@@ -15,10 +15,15 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
+// DATABASE_URL by hand or from Render; POSTGRES_URL is what Vercel's Neon
+// database adds when connected; STORAGE_URL if its prefix was left at Vercel's
+// suggestion.
+export function databaseUrl() {
+  return process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.STORAGE_URL || "";
+}
+
 export async function openStore() {
-  // DATABASE_URL by hand or from Render; POSTGRES_URL is what Vercel's Neon
-  // database adds when it is connected to the project.
-  const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+  const url = databaseUrl();
   if (url) return openPostgres(url);
   // A Vercel function has no disk that lasts, so files would vanish.
   if (process.env.VERCEL) {
@@ -42,15 +47,24 @@ async function openPostgres(url) {
   // pool; unheard, it would crash the whole server. The pool has already
   // thrown that connection away and opens a fresh one on the next query.
   pool.on("error", (err) => console.error("postgres: idle connection dropped:", err.message));
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS review_comments (
-      id text PRIMARY KEY,
-      n serial,
-      data jsonb NOT NULL,
-      shot bytea,
-      shot_type text,
-      created_at timestamptz NOT NULL DEFAULT now()
-    )`);
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS review_comments (
+        id text PRIMARY KEY,
+        n serial,
+        data jsonb NOT NULL,
+        shot bytea,
+        shot_type text,
+        created_at timestamptz NOT NULL DEFAULT now()
+      )`);
+  } catch (err) {
+    // Two cold starts on a new database both create the table; the loser is
+    // told it exists (42P07) or that its type does (23505). Either way, it does.
+    if (err.code !== "42P07" && err.code !== "23505") {
+      await pool.end().catch(() => {});
+      throw err;
+    }
+  }
 
   const row = (r) => ({ ...r.data, id: r.id, n: r.n });
   return {
@@ -58,6 +72,18 @@ async function openPostgres(url) {
     async list() {
       const { rows } = await pool.query("SELECT id, n, data FROM review_comments ORDER BY n");
       return rows.map(row);
+    },
+    async get(id) {
+      const { rows } = await pool.query("SELECT id, n, data FROM review_comments WHERE id = $1", [id]);
+      return rows.length ? row(rows[0]) : null;
+    },
+    // Changes whenever any comment is added, changed or removed, and is worked
+    // out inside the database, so asking "anything new?" moves a few bytes.
+    async version() {
+      const { rows } = await pool.query(
+        "SELECT count(*)::int AS c, coalesce(md5(string_agg(id || ':' || (data->>'updatedAt'), ',' ORDER BY n)), '') AS h FROM review_comments",
+      );
+      return `${rows[0].c}.${rows[0].h}`;
     },
     async create(data, shot) {
       const id = crypto.randomUUID();
@@ -142,6 +168,13 @@ async function openFiles(dir) {
     kind: "files",
     async list() {
       return comments;
+    },
+    async get(id) {
+      return comments.find((c) => c.id === id) || null;
+    },
+    async version() {
+      const h = crypto.createHash("md5").update(comments.map((c) => `${c.id}:${c.updatedAt}`).join(",")).digest("hex");
+      return `${comments.length}.${h}`;
     },
     async create(data, shot) {
       const id = crypto.randomUUID();

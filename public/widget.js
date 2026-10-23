@@ -21,11 +21,15 @@
   // mirror it is this site, reached with its cookie.
   const ORIGIN = document.currentScript ? new URL(document.currentScript.src, location.href).origin : location.origin;
   const REMOTE = ORIGIN !== location.origin;
-  const TOKEN = window.__jadmReviewToken || "";
-  const AUTH = TOKEN ? { "x-review-token": TOKEN } : {};
+  // The reviewer's token. It can change while the tab is open: clicking a
+  // newer button calls setToken instead of loading a second widget.
+  let TOKEN = window.__jadmReviewToken || "";
+  let AUTH = TOKEN ? { "x-review-token": TOKEN } : {};
   const BASE = `${ORIGIN}/__review`;
   const API = `${BASE}/api/comments`;
-  const shotUrl = (id) => `${BASE}/shots/${encodeURIComponent(id)}${TOKEN ? `?t=${encodeURIComponent(TOKEN)}` : ""}`;
+  // Each screenshot comes with its own key from the server, so the token
+  // never appears in an address.
+  const shotUrl = (c) => `${BASE}/shots/${encodeURIComponent(c.id)}?k=${encodeURIComponent(c.shotKey || "")}`;
 
   // The mirror starts this log before the app runs (server.js EARLY). On the
   // real jadm.ai it starts now, when the button is clicked: errors and failed
@@ -181,6 +185,8 @@
     .toast { position: fixed; right: 16px; bottom: 68px; background: #24a148; color: #fff; padding: 10px 16px; font-size: 14px;
       box-shadow: 0 2px 12px rgba(0,0,0,.28); z-index: 2147483003; max-width: calc(100vw - 32px); }
     .toast.err { background: #da1e28; }
+    .stale { position: fixed; right: 16px; bottom: 68px; max-width: min(420px, calc(100vw - 32px)); background: #fff8e1; color: #161616;
+      border-left: 4px solid #f1c21b; padding: 12px 16px; font-size: 14px; box-shadow: 0 2px 12px rgba(0,0,0,.28); z-index: 2147483003; }
   </style>
   <div class="layer"></div>
   <div class="bar" role="toolbar" aria-label="Review">
@@ -234,28 +240,53 @@
 
   // --- data ---------------------------------------------------------------
 
+  // The list's version as last seen: the server answers "unchanged" to an
+  // up-to-date tab instead of sending every comment again.
+  let version = "";
   async function refresh() {
     try {
-      const r = await fetch(API, { cache: "no-store", credentials: "same-origin", headers: AUTH });
+      const r = await fetch(`${API}?v=${encodeURIComponent(version)}`, { cache: "no-store", credentials: "same-origin", headers: AUTH });
       if (r.status === 401) return toEnter();
       if (!r.ok) return;
-      comments = (await r.json()).comments || [];
+      const d = await r.json();
+      if (d.unchanged) return;
+      version = d.v || "";
+      comments = d.comments || [];
       renderPins();
     } catch { /* offline for a moment; the next tick retries */ }
   }
 
-  // Not (or no longer) let in. On the mirror that means the name page; on
-  // jadm.ai the button itself is out of date (the team password changed).
-  let toldStale = false;
+  // Not (or no longer) let in. On the mirror that means the name page. On
+  // jadm.ai the button itself is out of date (the team password changed):
+  // say so where it stays visible, and say where to get a new one.
+  let staleEl = null;
   function toEnter() {
     if (!REMOTE) {
       location.href = `${BASE}/enter?next=${encodeURIComponent(location.pathname + location.search + location.hash)}`;
       return;
     }
-    if (toldStale) return;
-    toldStale = true;
-    toast("Your JADM Comment button is out of date. Open the review link to get a new one.", true, 12000);
+    if (staleEl) return;
+    staleEl = el(
+      "div",
+      "stale",
+      `Your JADM Comment button is out of date. <a href="${BASE}/setup" target="_blank" rel="noopener">Get a new one</a>, then click it here. Nothing you typed is lost.`,
+    );
+    staleEl.setAttribute("role", "alert");
+    root.appendChild(staleEl);
   }
+
+  window.__jadmReview = {
+    setToken(t) {
+      if (typeof t !== "string" || !t) return;
+      TOKEN = t;
+      AUTH = { "x-review-token": t };
+      staleEl?.remove();
+      staleEl = null;
+      version = "";
+      refresh();
+      toast("Your new JADM Comment button is on.");
+    },
+  };
 
   async function send(method, url, body) {
     const r = await fetch(url, {
@@ -265,9 +296,18 @@
       body: body ? JSON.stringify(body) : undefined,
     });
     if (r.status === 401) toEnter();
-    if (!r.ok && r.status !== 204) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok && r.status !== 204) throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status });
+    version = ""; // something changed; the next refresh fetches the list again
     return r.status === 204 ? null : r.json();
   }
+
+  // What went wrong with a save, in words a reviewer can act on.
+  const saveProblem = (err) =>
+    err?.status === 401
+      ? "Your JADM Comment button is out of date. Get a new one from the review link; your text is kept."
+      : err?.status === 413
+        ? "That screenshot is too big to send. Untick the screenshot and save again."
+        : "Could not save. Check the connection and try again.";
 
   // --- element identity ---------------------------------------------------
 
@@ -282,7 +322,9 @@
         parts.unshift("body");
         break;
       }
-      if (n.id && !/\d{3,}|:|^radix-|^headlessui-/.test(n.id)) {
+      // Generated ids change from render to render and from user to user
+      // (React's useId gives ":r5:" or "«r5»"), so they are not anchors.
+      if (n.id && !/\d{3,}|[:«»]|^radix-|^headlessui-/.test(n.id)) {
         parts.unshift(`#${CSS.escape(n.id)}`);
         break;
       }
@@ -418,8 +460,10 @@
   };
   addEventListener("scroll", schedulePins, true);
   addEventListener("resize", schedulePins);
+  // Moving to another screen closes a comment being read, but never one being
+  // written: it keeps the screen it was started on and can still be saved.
   addEventListener("hashchange", () => {
-    closeCard();
+    if (!draftOpen()) closeCard({ force: true });
     schedulePins();
   });
   // The app re-renders without telling anyone; keep the pins on their elements.
@@ -428,13 +472,13 @@
     updateSignin();
   }, 1000);
   // Everyone's new comments appear within a few seconds.
-  setInterval(() => { if (!document.hidden) refresh(); }, 10000);
+  setInterval(() => { if (!document.hidden) refresh(); }, 15000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 
   // --- picking ------------------------------------------------------------
 
   function startPick() {
-    closeCard();
+    if (!closeCard()) return;
     picking = true;
     pickBtn.classList.add("on");
     pickBtn.textContent = "Cancel";
@@ -461,13 +505,27 @@
   const fromPage = (e) => !e.composedPath().includes(host);
 
   // jadm.ai's dialogs keep focus inside themselves (Carbon's Modal, the app's
-  // own Tab trap). Moving into the review card must not count as leaving, or
-  // the dialog pulls focus back and the comment gets typed into the app.
+  // own Tab trap). While one is open, moving into the review card must not
+  // count as leaving it, or the dialog pulls focus back and the comment gets
+  // typed into the app. Everywhere else jadm.ai must hear every blur as
+  // normal: some of its fields save when you leave them. Carbon keeps closed
+  // dialogs in the page, so only a visible one counts.
+  const openTrap = () =>
+    [...document.querySelectorAll(".cds--modal.is-visible, [role='dialog'][aria-modal='true']")].find(
+      (d) => !host.contains(d) && d.getClientRects().length > 0 && getComputedStyle(d).visibility !== "hidden",
+    ) || null;
   for (const type of ["focusout", "blur"]) {
-    addEventListener(type, (e) => { if (e.relatedTarget === host || e.target === host) e.stopImmediatePropagation(); }, true);
+    addEventListener(
+      type,
+      (e) => {
+        if (e.target === host) return e.stopImmediatePropagation(); // leaving the widget: nothing of jadm.ai's
+        if (e.relatedTarget === host && e.target instanceof Node && openTrap()?.contains(e.target)) e.stopImmediatePropagation();
+      },
+      true,
+    );
   }
   for (const type of ["focusin", "focus"]) {
-    addEventListener(type, (e) => { if (e.target === host) e.stopImmediatePropagation(); }, true);
+    addEventListener(type, (e) => { if (e.target === host && openTrap()) e.stopImmediatePropagation(); }, true);
   }
 
   document.addEventListener(
@@ -514,6 +572,10 @@
         yPct: r.height ? (e.clientY - r.top) / r.height : 0.5,
         pageX: e.clientX + scrollX,
         pageY: e.clientY + scrollY,
+        // The screen as it was when the spot was picked: the comment belongs
+        // there even if the reviewer moves on before saving.
+        page: { origin: location.origin, url: urlWithoutFocus(), key: pageKey(), title: document.title },
+        viewport: { w: innerWidth, h: innerHeight, dpr: devicePixelRatio || 1 },
       };
       stopPick();
       compose(spot);
@@ -531,7 +593,7 @@
       const inWidget = !fromPage(e);
       if (e.key === "Escape") {
         if (picking) stopPick();
-        else closeCard();
+        else if (root.querySelector(".card")) closeCard();
       } else if (inWidget && e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
         root.querySelector(".card [data-save]")?.click();
       }
@@ -567,8 +629,17 @@
     if (card) placeCard(card, Number(card.dataset.x), Number(card.dataset.y));
   });
 
-  function closeCard() {
+  // A comment being written with text in it.
+  const draftOpen = () => Boolean(root.querySelector('.card[data-draft] textarea')?.value.trim());
+
+  // Closes the open card. A comment being written is only thrown away when
+  // the reviewer asked for exactly that (Cancel, ×, a save) or agrees to it;
+  // Escape, another pin or the Comment button ask first. Returns whether the
+  // card is gone.
+  function closeCard({ force = false } = {}) {
+    if (!force && draftOpen() && !confirm("Throw away the comment you are writing?")) return false;
     root.querySelectorAll(".card").forEach((c) => c.remove());
+    return true;
   }
 
   function chips(list, current, onPick, name) {
@@ -590,10 +661,11 @@
   }
 
   function compose(spot) {
-    closeCard();
+    if (!closeCard()) return;
     let kind = "bug";
     let priority = "medium";
     const card = el("div", "card");
+    card.dataset.draft = "";
     card.setAttribute("role", "dialog");
     card.setAttribute("aria-label", "New comment");
     card.innerHTML = `<header><span>New comment <small>as ${esc(me)}</small></span><button type="button" aria-label="Close">×</button></header><div class="body"></div>`;
@@ -607,8 +679,9 @@
       <div class="row"><button type="button" class="ghost" data-cancel>Cancel</button><button type="button" class="go" data-save>Save comment</button></div>`;
     body.querySelector("[data-kind]").replaceWith(chips(KINDS, kind, (k) => (kind = k), "What kind"));
     body.querySelector("[data-pri]").replaceWith(chips(PRIORITIES, priority, (p) => (priority = p), "How urgent"));
-    card.querySelector("header button").addEventListener("click", closeCard);
-    body.querySelector("[data-cancel]").addEventListener("click", closeCard);
+    const forceClose = () => closeCard({ force: true });
+    card.querySelector("header button").addEventListener("click", forceClose);
+    body.querySelector("[data-cancel]").addEventListener("click", forceClose);
     const textEl = body.querySelector("#rv-text");
     const saveBtn = body.querySelector("[data-save]");
     const save = async () => {
@@ -618,7 +691,11 @@
       saveBtn.disabled = true;
       saveBtn.textContent = "Saving…";
       const wantShot = body.querySelector("[data-shot]").checked;
+      // The card steps aside so it is not in the picture; say what is happening.
       card.style.visibility = "hidden";
+      const working = el("div", "toast", wantShot ? "Taking the screenshot and saving…" : "Saving…");
+      working.setAttribute("role", "status");
+      root.appendChild(working);
       const screenshot = wantShot ? await capture(spot) : null;
       try {
         const { comment } = await send("POST", API, {
@@ -626,21 +703,23 @@
           priority,
           text,
           screenshot,
-          page: { origin: location.origin, url: urlWithoutFocus(), key: pageKey(), title: document.title },
+          page: spot.page,
           target: { selector: spot.selector, label: spot.label, xPct: spot.xPct, yPct: spot.yPct, pageX: spot.pageX, pageY: spot.pageY },
-          viewport: { w: innerWidth, h: innerHeight, dpr: devicePixelRatio || 1 },
-          tech: (window.__jadmReviewLog || []).slice(-30),
+          viewport: spot.viewport,
+          tech: (window.__jadmReviewLog || []).slice(-15),
         });
         // A refresh that landed while saving may already have it.
         if (!comments.some((v) => v.id === comment.id)) comments.push(comment);
-        closeCard();
+        closeCard({ force: true });
         renderPins();
         toast(`Comment #${comment.n} saved — the whole team can see it${wantShot && !screenshot ? " (the screenshot could not be taken)" : ""}`);
-      } catch {
+      } catch (err) {
         card.style.visibility = "";
         saveBtn.disabled = false;
         saveBtn.textContent = "Save comment";
-        toast("Could not save. Check the connection and try again.", true);
+        toast(saveProblem(err), true, 8000);
+      } finally {
+        working.remove();
       }
     };
     saveBtn.addEventListener("click", save);
@@ -648,16 +727,32 @@
     textEl.focus();
   }
 
+  // The board's "Show on the page" puts review-focus inside the hash
+  // ("#/receivables?review-focus=…"): jadm.ai's Google sign-in brings people
+  // back with the hash but not the rest. Older links had it in the query.
+  function focusIdFromUrl() {
+    const h = location.hash;
+    const i = h.indexOf("?");
+    return new URLSearchParams(location.search).get("review-focus") || (i < 0 ? null : new URLSearchParams(h.slice(i + 1)).get("review-focus"));
+  }
+
   function urlWithoutFocus() {
     const u = new URL(location.href);
     u.searchParams.delete("review-focus");
+    const i = u.hash.indexOf("?");
+    if (i >= 0) {
+      const p = new URLSearchParams(u.hash.slice(i + 1));
+      p.delete("review-focus");
+      const rest = p.toString();
+      u.hash = u.hash.slice(1, i) + (rest ? `?${rest}` : "");
+    }
     return u.pathname + u.search + u.hash;
   }
 
   function showComment(id, x, y) {
     const c = comments.find((v) => v.id === id);
     if (!c) return;
-    closeCard();
+    if (!closeCard()) return;
     const card = el("div", "card");
     card.setAttribute("role", "dialog");
     card.setAttribute("aria-label", `Comment ${c.n}`);
@@ -666,7 +761,7 @@
       <div class="body">
         <div class="meta"><span class="tag">${esc(label(KINDS, c.kind))}</span><span class="tag ${c.priority}">${esc(label(PRIORITIES, c.priority))}</span>${statusTag}<span>${esc(ago(c.createdAt))}</span></div>
         <p class="text">${esc(c.text)}</p>
-        ${c.shot ? `<img class="shot" src="${esc(shotUrl(c.id))}" alt="Screenshot taken with the comment">` : ""}
+        ${c.shot ? `<img class="shot" src="${esc(shotUrl(c))}" alt="Screenshot taken with the comment">` : ""}
         ${(c.replies || []).map((r) => `<div class="reply"><div class="who">${esc(r.author)} · ${esc(ago(r.at))}</div><p class="text">${esc(r.text)}</p></div>`).join("")}
         <label for="rv-reply">Reply</label>
         <textarea id="rv-reply" maxlength="4000" placeholder="Add detail, or say how it was fixed"></textarea>
@@ -678,7 +773,7 @@
         <div class="foot"><a href="${BASE}/#c${c.n}" target="_blank" rel="noopener">Open on the feedback board</a></div>
       </div>`;
     card.querySelector("header button").addEventListener("click", closeCard);
-    card.querySelector(".shot")?.addEventListener("click", () => open(shotUrl(c.id), "_blank"));
+    card.querySelector(".shot")?.addEventListener("click", () => open(shotUrl(c), "_blank"));
     // The list is replaced every few seconds; always act on its latest copy.
     const current = () => comments.find((v) => v.id === id) || c;
     const update = async (patch) => {
@@ -718,8 +813,15 @@
     libLoading ??= new Promise((resolve, reject) => {
       const s = document.createElement("script");
       s.src = SHOT_LIB;
-      s.onload = () => resolve(window.html2canvas);
+      // A slow or blocked download never holds the save up for long: after
+      // ten seconds the comment goes without its picture.
+      const giveUp = setTimeout(() => s.onerror(), 10000);
+      s.onload = () => {
+        clearTimeout(giveUp);
+        resolve(window.html2canvas);
+      };
       s.onerror = () => {
+        clearTimeout(giveUp);
         libLoading = null;
         reject(new Error("screenshot library did not load"));
       };
@@ -794,8 +896,13 @@
 
   // ?review-focus=<id>: arrived from the board's "Show on the page" link.
   async function focusFromUrl() {
-    const id = new URLSearchParams(location.search).get("review-focus");
+    const id = focusIdFromUrl();
     if (!id) return;
+    // Once only: take it out of the address so later screens are left alone.
+    // replaceState fires no hashchange, so jadm.ai's router is not disturbed.
+    try {
+      history.replaceState(history.state, "", urlWithoutFocus());
+    } catch { /* the page forbids it; harmless */ }
     for (let i = 0; i < 20; i++) {
       const c = comments.find((v) => v.id === id);
       if (c) {

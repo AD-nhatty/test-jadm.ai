@@ -77,7 +77,8 @@
   .tag.medium { background: var(--md-bg); color: var(--md-fg); }
   .tag.low { background: var(--lo-bg); color: var(--lo-fg); }
   .tag.fixed { background: var(--ok-bg); color: var(--ok-fg); }
-  .text { margin: 0; white-space: pre-wrap; word-wrap: break-word; font-size: 15px; }
+  .text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 15px; }
+  .sync { font-size: 12px; color: var(--red); margin: -8px 0 12px; min-height: 0; }
   .where { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .where code, .tech code { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; }
   .tech summary { font-size: 12px; color: var(--red); cursor: pointer; }
@@ -85,7 +86,7 @@
   .tech li { word-break: break-all; }
   .replies { border-top: 1px solid var(--line); padding-top: 8px; display: grid; gap: 6px; }
   .reply .who { font-size: 12px; color: var(--faint); }
-  .reply p { margin: 0; white-space: pre-wrap; }
+  .reply p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
   .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: auto; padding-top: 4px; }
   .actions a, .actions button { font: inherit; font-size: 13px; color: var(--blue); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: none; }
   .actions a:hover, .actions button:hover { text-decoration: underline; }
@@ -126,9 +127,11 @@
     <label>Person<select id="f-author"><option value="">Everyone</option></select></label>
     <label>Group by<select id="f-group"><option value="page">Page</option><option value="none">Nothing (newest first)</option><option value="author">Person</option></select></label>
     <label class="grow">Search<input id="f-q" type="search" placeholder="Words in the comment or the page"></label>
-    <button class="btn ghost" type="button" id="csv">Download CSV</button>
+    <button class="btn ghost" type="button" id="csv" title="Every comment, whatever the filters show">Download CSV</button>
+    <button class="btn" type="button" id="zip" title="Every comment as a spreadsheet, plus every screenshot, in one file to keep">Download everything (.zip)</button>
   </div>
-  <div class="list" id="list" aria-live="polite"></div>
+  <p class="sync" id="sync" role="status"></p>
+  <div class="list" id="list"></div>
   <p class="note">Updates every 15 seconds. Comments are added on jadm.ai with the <b>JADM Comment</b> bookmark button (<a href="/__review/setup">get yours</a>).</p>
 </main>
 <div class="lightbox" id="lightbox"><img alt="Screenshot"></div>
@@ -160,27 +163,49 @@
   });
 
   // The address that reopens a comment's spot: its page, on the site it was
-  // written on (the real jadm.ai, or this mirror), with ?review-focus, which
-  // the widget reads to scroll there and open the comment.
+  // written on (the real jadm.ai, or this mirror), with review-focus, which
+  // the widget reads to scroll there and open the comment. It goes inside the
+  // hash ("#/receivables?review-focus=…"): jadm.ai's Google sign-in returns
+  // people with the hash and nothing else.
   function focusUrl(c) {
     try {
       const u = new URL(c.page.url || "/", c.page.origin || location.origin);
-      u.searchParams.set("review-focus", c.id);
+      u.searchParams.delete("review-focus");
+      const h = u.hash.slice(1);
+      const qi = h.indexOf("?");
+      let route = qi < 0 ? h : h.slice(0, qi);
+      const params = new URLSearchParams(qi < 0 ? "" : h.slice(qi + 1));
+      if (!route.startsWith("/") || !route.slice(1).trim()) route = "/dashboard";
+      params.set("review-focus", c.id);
+      u.hash = `${route}?${params}`;
       return u.href;
     } catch { return "/"; }
   }
   const onJadm = (c) => Boolean(c.page.origin) && c.page.origin !== location.origin;
   const pageName = (c) => c.page.key || "/";
+  const shotSrc = (c) => `${BASE}/shots/${encodeURIComponent(c.id)}?k=${encodeURIComponent(c.shotKey || "")}`;
 
+  // Asks every 15 seconds with the version it has; only a real change brings
+  // the list again and redraws, so a reply being typed, the keyboard focus and
+  // a screen reader are left alone the rest of the time. A failed ask keeps
+  // what is on screen.
+  let version = "";
   async function load() {
     try {
-      const r = await fetch(API, { cache: "no-store", credentials: "same-origin" });
+      const r = await fetch(`${API}?v=${encodeURIComponent(version)}`, { cache: "no-store", credentials: "same-origin" });
       if (r.status === 401) { location.href = `${BASE}/enter?next=${encodeURIComponent(BASE + "/")}`; return; }
       if (!r.ok) throw new Error();
-      comments = (await r.json()).comments || [];
+      const d = await r.json();
+      $("#sync").textContent = "";
+      if (d.unchanged) return;
+      version = d.v || "";
+      comments = d.comments || [];
       render();
     } catch {
-      $("#list").innerHTML = '<div class="empty"><b>Could not load the feedback</b>Check the connection; it retries by itself.</div>';
+      $("#sync").textContent = "Could not reach the review site just now. What you see may be out of date; it tries again by itself.";
+      if (!comments.length && !$("#list").children.length) {
+        $("#list").innerHTML = '<div class="empty"><b>Could not load the feedback</b>Check the connection; it retries by itself.</div>';
+      }
     }
   }
 
@@ -211,7 +236,7 @@
     const status = c.status === "open" ? "" : `<span class="tag fixed">${c.status === "fixed" ? "Fixed" : "Won't fix"}${c.statusBy ? ` by ${esc(c.statusBy)}` : ""}</span>`;
     const tech = c.tech || [];
     return `<article class="item p-${c.priority} s-${c.status}" id="c${c.n}" data-id="${esc(c.id)}">
-      <div class="thumb">${c.shot ? `<img loading="lazy" src="${BASE}/shots/${encodeURIComponent(c.id)}" alt="Screenshot of #${c.n}">` : "No screenshot"}</div>
+      <div class="thumb">${c.shot ? `<img loading="lazy" src="${esc(shotSrc(c))}" alt="Screenshot of #${c.n}">` : "No screenshot"}</div>
       <div class="content">
         <div class="line1"><span class="num">#${c.n}</span><span class="tag">${KIND[c.kind] || esc(c.kind)}</span><span class="tag ${c.priority}">${PRI[c.priority]}</span>${status}
           <span>${esc(c.author)} · ${when(c.createdAt)}</span></div>
@@ -262,6 +287,16 @@
 
   function draw() {
     renderStats();
+    // Opened at "#c12" (a pin's "Open on the feedback board"): make sure #12
+    // is on the list even if it is fixed and the filters hide fixed ones.
+    if (location.hash && !scrolledToHash) {
+      const n = Number(location.hash.slice(2));
+      const wanted = comments.find((c) => c.n === n);
+      if (wanted && !filtered().includes(wanted)) {
+        for (const id of ["#f-status", "#f-priority", "#f-kind", "#f-author"]) $(id).value = "";
+        $("#f-q").value = "";
+      }
+    }
     const rows = filtered();
     if (!rows.length) {
       $("#list").innerHTML = comments.length
@@ -290,12 +325,19 @@
   let scrolledToHash = false;
 
   async function call(method, id, body) {
-    const r = await fetch(`${API}/${id}`, {
-      method, credentials: "same-origin",
-      headers: { "content-type": "application/json" },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    let r;
+    try {
+      r = await fetch(`${API}/${id}`, {
+        method, credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+    } catch {
+      alert("Could not reach the review site. Check the connection and try again.");
+      return false;
+    }
     if (!r.ok && r.status !== 204) { alert("Could not save. Try again."); return false; }
+    version = ""; // the next check fetches the list with this change in it
     if (method === "DELETE") comments = comments.filter((c) => c.id !== id);
     else {
       const { comment } = await r.json();
@@ -347,24 +389,138 @@
   for (const id of ["#f-status", "#f-priority", "#f-kind", "#f-author", "#f-group"]) $(id).addEventListener("change", render);
   $("#f-q").addEventListener("input", render);
 
-  $("#csv").addEventListener("click", () => {
-    const cols = ["#", "Status", "Priority", "Kind", "Person", "When", "Comment", "Page", "Element", "Screen", "Technical problems", "Replies", "Screenshot", "Link"];
+  // --- keeping a copy --------------------------------------------------------
+  // Both downloads hold EVERY comment, whatever the filters show: they are what
+  // is left once the review site is deleted.
+
+  const today = () => new Date().toISOString().slice(0, 10);
+  const byNumber = () => [...comments].sort((x, y) => x.n - y.n);
+  const shotName = (c) => `screenshots/${c.n}.${c.shotType === "image/png" ? "png" : "jpg"}`;
+
+  // shotCell: what the Screenshot column says for a comment that has one.
+  function csvText(rows, shotCell) {
+    const cols = ["#", "Status", "Priority", "Kind", "Person", "When", "Comment", "Page", "Element", "Screen", "Technical problems", "Replies", "Fixed / won't fix by", "Screenshot", "Link"];
     // A cell starting with = + - @ is run as a formula by Excel; the apostrophe keeps it text.
     const q = (v) => {
       let s = String(v ?? "");
       if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
       return `"${s.replace(/"/g, '""')}"`;
     };
-    const lines = [cols.map(q).join(",")].concat(filtered().map((c) => [
+    return "﻿" + [cols.map(q).join(",")].concat(rows.map((c) => [
       c.n, c.status, c.priority, c.kind, c.author, c.createdAt, c.text, c.page.key, c.target.label, `${c.viewport.w}x${c.viewport.h}`,
       (c.tech || []).map((t) => `[${t.type}] ${t.text}`).join(" | "),
       (c.replies || []).map((r) => `${r.author}: ${r.text}`).join(" | "),
-      c.shot ? `${location.origin}${BASE}/shots/${c.id}` : "", focusUrl(c),
-    ].map(q).join(",")));
+      c.statusBy || "",
+      c.shot ? shotCell(c) : "", focusUrl(c),
+    ].map(q).join(","))).join("\r\n");
+  }
+
+  function save(blob, name) {
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv" }));
-    a.download = `jadm-feedback-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
     a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  }
+
+  $("#csv").addEventListener("click", () => {
+    save(new Blob([csvText(byNumber(), (c) => location.origin + shotSrc(c))], { type: "text/csv" }), `jadm-feedback-${today()}.csv`);
+  });
+
+  // A plain ZIP (stored, not compressed: the pictures are already JPEGs),
+  // written here so nothing else has to be loaded.
+  const CRC = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+  function crc32(bytes) {
+    let c = 0xffffffff;
+    for (let i = 0; i < bytes.length; i++) c = CRC[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  }
+  function zip(files) {
+    const enc = new TextEncoder();
+    const d = new Date();
+    const time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+    const date = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+    const parts = [];
+    const central = [];
+    let offset = 0;
+    for (const f of files) {
+      const name = enc.encode(f.name);
+      const data = f.data instanceof Uint8Array ? f.data : enc.encode(f.data);
+      const crc = crc32(data);
+      const head = new DataView(new ArrayBuffer(30));
+      head.setUint32(0, 0x04034b50, true);
+      head.setUint16(4, 20, true);
+      head.setUint16(6, 0x0800, true); // names are UTF-8
+      head.setUint16(10, time, true);
+      head.setUint16(12, date, true);
+      head.setUint32(14, crc, true);
+      head.setUint32(18, data.length, true);
+      head.setUint32(22, data.length, true);
+      head.setUint16(26, name.length, true);
+      parts.push(new Uint8Array(head.buffer), name, data);
+      const cd = new DataView(new ArrayBuffer(46));
+      cd.setUint32(0, 0x02014b50, true);
+      cd.setUint16(4, 20, true);
+      cd.setUint16(6, 20, true);
+      cd.setUint16(8, 0x0800, true);
+      cd.setUint16(12, time, true);
+      cd.setUint16(14, date, true);
+      cd.setUint32(16, crc, true);
+      cd.setUint32(20, data.length, true);
+      cd.setUint32(24, data.length, true);
+      cd.setUint16(28, name.length, true);
+      cd.setUint32(42, offset, true);
+      central.push(new Uint8Array(cd.buffer), name);
+      offset += 30 + name.length + data.length;
+    }
+    const cdSize = central.reduce((s, p) => s + p.length, 0);
+    const end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true);
+    end.setUint16(8, files.length, true);
+    end.setUint16(10, files.length, true);
+    end.setUint32(12, cdSize, true);
+    end.setUint32(16, offset, true);
+    return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: "application/zip" });
+  }
+
+  $("#zip").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    if (btn.disabled) return;
+    btn.disabled = true;
+    const rows = byNumber();
+    const files = [];
+    const missing = [];
+    try {
+      const withShots = rows.filter((c) => c.shot);
+      for (const [i, c] of withShots.entries()) {
+        btn.textContent = `Getting screenshots ${i + 1} of ${withShots.length}…`;
+        try {
+          const r = await fetch(shotSrc(c), { credentials: "same-origin" });
+          if (!r.ok) throw new Error();
+          c.shotType = r.headers.get("content-type");
+          files.push({ name: shotName(c), data: new Uint8Array(await r.arrayBuffer()) });
+        } catch {
+          missing.push(c.n);
+        }
+      }
+      files.unshift(
+        { name: "jadm-feedback.csv", data: csvText(rows, (c) => (missing.includes(c.n) ? "(could not be downloaded)" : shotName(c))) },
+        { name: "comments.json", data: JSON.stringify(rows, null, 2) },
+      );
+      save(zip(files), `jadm-feedback-${today()}.zip`);
+      if (missing.length) alert(`Saved. The screenshots of #${missing.join(", #")} could not be downloaded; try again for those.`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Download everything (.zip)";
+    }
   });
 
   fetch(`${BASE}/api/me`, { credentials: "same-origin" })

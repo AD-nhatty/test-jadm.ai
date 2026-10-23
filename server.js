@@ -35,7 +35,7 @@ import https from "node:https";
 import path from "node:path";
 import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
-import { openStore } from "./store.js";
+import { databaseUrl, openStore } from "./store.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TARGET = new URL(process.env.TARGET_URL || "https://jadm.ai");
@@ -43,13 +43,17 @@ const PORT = Number(process.env.PORT || 8080);
 const TEAM_PASSWORD = (process.env.TEAM_PASSWORD || "").trim();
 // Vercel runs this as functions (api/index.js), several copies at once, so the
 // key that signs names into cookies and buttons must be the same everywhere.
-// Without SESSION_SECRET it comes from the team password: anyone who could
-// forge a name with it could also just type that name at the door.
+// Without SESSION_SECRET it comes from the team password through scrypt, which
+// is slow on purpose: someone holding one button cannot afford to test
+// password guesses against it offline. (Forging a name is no gain anyway;
+// anyone with the password can type any name at the door.)
 const VERCEL = Boolean(process.env.VERCEL);
 const HOSTED = VERCEL || Boolean(process.env.RENDER);
 const SECRET =
   process.env.SESSION_SECRET ||
-  (TEAM_PASSWORD ? crypto.createHash("sha256").update(`jadm-review|${TEAM_PASSWORD}`).digest("hex") : crypto.randomBytes(32).toString("hex"));
+  (TEAM_PASSWORD
+    ? crypto.scryptSync(TEAM_PASSWORD, "jadm-review|session-key|v2", 32, { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 }).toString("hex")
+    : crypto.randomBytes(32).toString("hex"));
 const P = "/__review";
 const COOKIE = "jadm_reviewer";
 // Vercel refuses request bodies over 4.5 MB; a screenshot is well under that.
@@ -71,19 +75,29 @@ const STATUSES = ["open", "fixed", "wontfix"];
 // What is missing before this site can work, said on every page rather than
 // as a crash: on a public address (Render, Vercel) a team password is a must,
 // or anyone who found it could read the comments; and comments need somewhere
-// to live.
+// to live. Only settings count here. A database that is merely slow to answer
+// is retried on the next request (getStore), never remembered as "not set up".
 let setupProblem = null;
-let store = null;
 if (HOSTED && !TEAM_PASSWORD) {
   setupProblem = "TEAM_PASSWORD is not set. Add it in the project's Environment Variables, then redeploy.";
-} else {
-  try {
-    store = await openStore();
-  } catch (err) {
-    console.error("comments store:", err.message);
-    setupProblem = err.message;
-  }
+} else if (VERCEL && !databaseUrl()) {
+  setupProblem =
+    "No database is connected. In Vercel open the project → Storage → Create Database → Neon (Postgres), connect it to this project, then redeploy.";
 }
+
+let store = null;
+let opening = null;
+function getStore() {
+  opening ??= openStore().then(
+    (s) => (store = s),
+    (err) => {
+      opening = null;
+      throw err;
+    },
+  );
+  return opening;
+}
+if (!setupProblem) await getStore().catch((err) => console.error("comments store:", err.message));
 
 // --- small helpers ------------------------------------------------------------
 
@@ -96,7 +110,17 @@ const redirect = (res, to, status = 302) => send(res, status, "", "text/plain", 
 const wantsHtml = (req) => String(req.headers.accept || "").includes("text/html");
 const isHttps = (req) => String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() === "https";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
-const str = (v, max) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+// Text as PostgreSQL will take it: no NUL characters, and no half of an emoji
+// (a lone surrogate, which cutting at `max` could also make) — either would
+// make the database refuse the whole comment.
+const str = (v, max) =>
+  typeof v === "string"
+    ? v
+        .replace(/\u0000/g, "")
+        .trim()
+        .slice(0, max)
+        .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "")
+    : "";
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 const oneOf = (v, list, fallback) => (list.includes(v) ? v : fallback);
 
@@ -155,21 +179,25 @@ function cookies(req) {
   return out;
 }
 
-// The cookie on this site, or the same signed value as a token: in the
-// x-review-token header from the widget on jadm.ai, or as ?t= on a
-// screenshot, which an <img> cannot send headers for.
-function reviewer(req, url) {
-  return (
-    nameFrom(cookies(req)[COOKIE]) ||
-    nameFrom(req.headers["x-review-token"]) ||
-    (req.method === "GET" && url.pathname.startsWith(`${P}/shots/`) ? nameFrom(url.searchParams.get("t")) : null)
-  );
+// The cookie on this site, or the same signed value as a token in the
+// x-review-token header, from the widget on jadm.ai.
+function reviewer(req) {
+  return nameFrom(cookies(req)[COOKIE]) || nameFrom(req.headers["x-review-token"]);
 }
+
+// A screenshot's own key, handed out with the comment list. An <img> cannot
+// send the token header, and the token must not travel in addresses (they get
+// copied, pasted and opened in new tabs), so each picture has a key that opens
+// that picture and nothing else.
+const shotKey = (id) => sign(`shot|${id}`).slice(0, 22);
+const withShotKey = (c) => (c.shot ? { ...c, shotKey: shotKey(c.id) } : c);
 
 function nameFrom(raw) {
   if (typeof raw !== "string" || !raw) return null;
   const [value, mac] = raw.split(".");
-  if (!value || !mac) return null;
+  // A real signature is always 43 base64url characters; anything else (other
+  // lengths, or characters that are more than one byte) is simply not one.
+  if (!value || !/^[A-Za-z0-9_-]{43}$/.test(mac || "")) return null;
   const expected = sign(value);
   if (mac.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(expected))) return null;
   try {
@@ -192,6 +220,27 @@ function reviewerCookie(req, name, maxAge = 30 * 24 * 3600) {
 function originOf(req) {
   const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
   return /^[a-z0-9.-]+(:\d+)?$/i.test(host) ? `${isHttps(req) ? "https" : "http"}://${host}` : "";
+}
+
+// The address a reviewer's button points at. Never just "whatever address
+// served the setup page": on Vercel the same site also answers on
+// per-deployment addresses, which sit behind Vercel's own sign-in and vanish
+// with old deployments, so a button made there would fail for its owner.
+// PUBLIC_URL pins it by hand; otherwise the host's production address.
+function publicOrigin(req) {
+  const pinned = (process.env.PUBLIC_URL || "").trim();
+  if (pinned) {
+    try {
+      return new URL(pinned).origin;
+    } catch { /* not a URL; fall through */ }
+  }
+  if (VERCEL && process.env.VERCEL_PROJECT_PRODUCTION_URL) return `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`;
+  if (process.env.RENDER_EXTERNAL_URL) {
+    try {
+      return new URL(process.env.RENDER_EXTERNAL_URL).origin;
+    } catch { /* fall through */ }
+  }
+  return originOf(req);
 }
 
 // The widget on jadm.ai calls this server from jadm.ai's origin, and only from
@@ -304,7 +353,10 @@ async function enter(req, res, url) {
 function bookmarklet(token, origin) {
   const code =
     `(function(){if(location.hostname!==${JSON.stringify(TARGET.hostname)}){alert("Open ${TARGET.hostname} first, then click JADM Comment.");return}` +
-    `if(window.__jadmReview)return;window.__jadmReviewToken=${JSON.stringify(token)};` +
+    // Already on in this tab: hand it this (perhaps newer) token instead of
+    // loading a second copy.
+    `if(window.__jadmReview){window.__jadmReview.setToken&&window.__jadmReview.setToken(${JSON.stringify(token)});return}` +
+    `window.__jadmReviewToken=${JSON.stringify(token)};` +
     `var s=document.createElement("script");s.src=${JSON.stringify(`${origin}${P}/widget.js`)}+"?v="+Date.now();` +
     `s.onerror=function(){alert("The review site did not answer. Open the review link once to wake it, then try again.")};` +
     `document.body.appendChild(s)})()`;
@@ -342,7 +394,12 @@ textarea{width:100%;height:84px;margin-top:8px;font:12px/1.4 ui-monospace,monosp
 <li><b>Click “JADM Comment” in your bookmarks bar</b><p>The <b>Comment</b> button and everyone's pins appear at the bottom right. After you reload a page, click it once more.</p></li>
 </ol>
 <details><summary>Cannot drag it? Add it by hand</summary>
-<p>Copy this, then right-click the bookmarks bar → <b>Add page…</b>, name it <b>JADM Comment</b>, and paste it as the URL.</p>
+<p>Press <b>Copy</b>, then make a new bookmark named <b>JADM Comment</b> and paste this as its address (URL):</p>
+<ul style="margin:8px 0;padding-left:20px;color:var(--muted)">
+<li style="background:none;padding:0;margin:2px 0;counter-increment:none"><b>Chrome / Edge:</b> right-click the bookmarks bar → <i>Add page…</i> (Edge: <i>Add favorite</i>)</li>
+<li style="background:none;padding:0;margin:2px 0;counter-increment:none"><b>Firefox:</b> right-click the bookmarks toolbar → <i>Add Bookmark…</i></li>
+<li style="background:none;padding:0;margin:2px 0;counter-increment:none"><b>Safari:</b> bookmark any page (<kbd>⌘</kbd> + <kbd>D</kbd>), then in <i>Bookmarks → Edit Bookmarks</i> change its address to this</li>
+</ul>
 <textarea readonly id="code">${esc(href)}</textarea><button class="copy" type="button" id="copy">Copy</button></details>
 <p class="foot">This button is yours: it signs comments as ${esc(name)}, so do not send it to anyone. · <a href="${P}/">See all feedback</a> · <a href="${P}/leave">Not ${esc(name)}?</a></p>
 </main><script>
@@ -366,11 +423,13 @@ function parseShot(dataUrl) {
   return m ? { type: m[1], buf: Buffer.from(m[2], "base64") } : null;
 }
 
+// The page's last problems, kept short: every comment's copy is sent to every
+// reviewer with the list.
 function cleanTech(list) {
   if (!Array.isArray(list)) return [];
-  return list.slice(-30).map((e) => ({
+  return list.slice(-15).map((e) => ({
     type: oneOf(e?.type, ["error", "console", "request"], "error"),
-    text: str(e?.text, 500),
+    text: str(e?.text, 300),
     at: num(e?.at),
   }));
 }
@@ -384,13 +443,19 @@ async function own(req, res, url, name) {
     return send(res, 302, "", "text/plain", { location: `${P}/enter`, "set-cookie": reviewerCookie(req, "", 0) });
   }
   if (req.method === "GET" && p === `${P}/setup`) {
-    return send(res, 200, setupPage(name, originOf(req)), "text/html; charset=utf-8");
+    return send(res, 200, setupPage(name, publicOrigin(req)), "text/html; charset=utf-8");
   }
   if (req.method === "GET" && p === `${P}/api/me`) {
     return json(res, 200, { name, store: store.kind, autoLogin: AUTO_LOGIN, mirror: MIRROR, target: TARGET.origin });
   }
 
-  if (req.method === "GET" && p === `${P}/api/comments`) return json(res, 200, { comments: await store.list() });
+  // Every open tab asks every few seconds. With ?v= it says which version it
+  // already has, and an unchanged list costs a few bytes instead of all of it.
+  if (req.method === "GET" && p === `${P}/api/comments`) {
+    const v = await store.version();
+    if (url.searchParams.get("v") === v) return json(res, 200, { v, unchanged: true });
+    return json(res, 200, { v, comments: (await store.list()).map(withShotKey) });
+  }
 
   if (req.method === "POST" && p === `${P}/api/comments`) {
     const b = await readJson(req);
@@ -425,7 +490,7 @@ async function own(req, res, url, name) {
       },
       parseShot(b.screenshot),
     );
-    return json(res, 201, { comment });
+    return json(res, 201, { comment: withShotKey(comment) });
   }
 
   if (m && req.method === "PATCH") {
@@ -445,11 +510,11 @@ async function own(req, res, url, name) {
       if (replyText) next.replies.push({ author: name, text: replyText, at: now });
       return next;
     });
-    return comment ? json(res, 200, { comment }) : json(res, 404, { error: "not_found" });
+    return comment ? json(res, 200, { comment: withShotKey(comment) }) : json(res, 404, { error: "not_found" });
   }
 
   if (m && req.method === "DELETE") {
-    const c = (await store.list()).find((x) => x.id === m[1]);
+    const c = await store.get(m[1]);
     if (!c) return json(res, 404, { error: "not_found" });
     // Only the person who wrote it; anyone else marks it fixed or won't-fix.
     if (c.author !== name) return json(res, 403, { error: "only_the_author_can_delete" });
@@ -458,13 +523,25 @@ async function own(req, res, url, name) {
   }
 
   const s = /^\/__review\/shots\/([0-9a-f-]{36})$/.exec(p);
-  if (s && req.method === "GET") {
-    const shot = await store.shot(s[1]);
-    if (!shot) return send(res, 404, "Not found");
-    return send(res, 200, shot.buf, shot.type, { "cache-control": "private, max-age=86400" });
-  }
+  if (s && req.method === "GET") return sendShot(res, s[1]);
 
   send(res, 404, "Not found");
+}
+
+async function sendShot(res, id) {
+  const shot = await store.shot(id);
+  if (!shot) return send(res, 404, "Not found");
+  return send(res, 200, shot.buf, shot.type, { "cache-control": "private, max-age=86400" });
+}
+
+// A screenshot opened by its own key (see shotKey), with no login needed.
+function shotByKey(url) {
+  const s = /^\/__review\/shots\/([0-9a-f-]{36})$/.exec(url.pathname);
+  const k = url.searchParams.get("k");
+  if (!s || typeof k !== "string" || k.length !== 22) return null;
+  const a = Buffer.from(k);
+  const b = Buffer.from(shotKey(s[1]));
+  return a.length === b.length && crypto.timingSafeEqual(a, b) ? s[1] : null;
 }
 
 // --- signing reviewers in to jadm.ai ------------------------------------------------
@@ -740,7 +817,18 @@ export async function handle(req, res) {
     // The widget holds no secrets; the button loads it before any token is checked.
     if (url.pathname === `${P}/widget.js` && req.method === "GET") return file(res, "widget.js", "text/javascript; charset=utf-8");
     if (url.pathname === `${P}/enter`) return await enter(req, res, url);
-    const name = reviewer(req, url);
+    // Everything else needs the comments. A database that does not answer
+    // right now is tried again on the next request.
+    try {
+      await getStore();
+    } catch (err) {
+      console.error("comments store:", err.message);
+      const msg = "The comments database could not be reached just now. Wait a few seconds and try again.";
+      return wantsHtml(req) ? send(res, 503, msg) : json(res, 503, { error: "db_unavailable", message: msg });
+    }
+    const keyed = req.method === "GET" && shotByKey(url);
+    if (keyed) return await sendShot(res, keyed);
+    const name = reviewer(req);
     if (!name) {
       if (req.method === "GET" && wantsHtml(req)) return redirect(res, `${P}/enter?next=${encodeURIComponent(req.url)}`);
       return json(res, 401, { error: "enter_your_name_first", enter: `${P}/enter` });
@@ -765,7 +853,7 @@ if (!VERCEL) {
   http.createServer(handle).listen(PORT, () => {
     console.log(`JADM Review on http://localhost:${PORT}  ->  ${TARGET.origin}${MIRROR ? " (mirror on)" : " (comment button; mirror off)"}`);
     if (setupProblem) return console.log(`  NOT SET UP: ${setupProblem}`);
-    console.log(`  comments: ${store.kind === "postgres" ? "PostgreSQL" : "./data (local files)"}`);
+    console.log(`  comments: ${!store ? "database not reachable yet" : store.kind === "postgres" ? "PostgreSQL" : "./data (local files)"}`);
     console.log(`  team password: ${TEAM_PASSWORD ? "on" : "OFF - anyone with the link can enter"}`);
     console.log(`  jadm.ai sign-in: ${AUTO_LOGIN ? `automatic, as ${LOGIN_EMAIL}` : "each reviewer signs in themselves"}`);
   });

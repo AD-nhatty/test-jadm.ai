@@ -112,6 +112,30 @@ describe("the personal JADM Comment button", () => {
     assert.equal((await api(site.base, madeUp)("GET", "")).status, 401);
   });
 
+  test("a token with odd characters is refused politely, not with a crash", async () => {
+    const value = Buffer.from("Omar").toString("base64url");
+    const odd = `${value}.${"é" + "a".repeat(42)}`;
+    const viaCookie = await fetch(`${site.base}/__review/api/comments`, { headers: { cookie: `jadm_reviewer=${odd}` } });
+    assert.equal(viaCookie.status, 401);
+    const viaKey = await fetch(`${site.base}/__review/shots/00000000-0000-4000-8000-000000000000?k=${encodeURIComponent("é".repeat(22))}`);
+    assert.equal(viaKey.status, 401);
+    assert.doesNotMatch(site.output(), /ERR_CRYPTO|RangeError/);
+  });
+
+  test("the button points at the site's main address, not whichever one the page was opened on", async () => {
+    const other = await startSite({ env: { PUBLIC_URL: "https://review.example.app" }, useDb: false });
+    try {
+      const t = (await enter(other.base, "Nati")).token;
+      const html = await (await fetch(`${other.base}/__review/setup`, { headers: { cookie: `jadm_reviewer=${t}` } })).text();
+      const href = /href="(javascript:[^"]+)"/.exec(html)[1];
+      const code = decodeURIComponent(href.replace(/&#(\d+);/g, (_, n) => String.fromCharCode(n)).slice("javascript:".length));
+      assert.ok(code.includes('"https://review.example.app/__review/widget.js"'));
+      assert.ok(!code.includes(other.base));
+    } finally {
+      await other.stop();
+    }
+  });
+
   test("only jadm.ai may call the review API from a browser", async () => {
     const preflight = (origin) =>
       fetch(`${site.base}/__review/api/comments`, {
@@ -159,16 +183,43 @@ describe("comments", () => {
     assert.ok(data.comments.some((c) => c.author === "Sara"));
   });
 
-  test("the screenshot loads with the token in its address, and not without", async () => {
+  test("a screenshot opens with its own key, and the token never goes in an address", async () => {
     const { data } = await sara("GET", "");
     const c = data.comments.find((x) => x.shot);
+    assert.match(c.shotKey, /^[A-Za-z0-9_-]{22}$/);
+    const withKey = await fetch(`${site.base}/__review/shots/${c.id}?k=${c.shotKey}`);
+    assert.equal(withKey.status, 200);
+    assert.equal(withKey.headers.get("content-type"), "image/png");
+    assert.equal((await withKey.arrayBuffer()).byteLength > 0, true);
+    assert.equal((await fetch(`${site.base}/__review/shots/${c.id}`)).status, 401, "no key, no login: refused");
+    const other = data.comments.find((x) => x.shot && x.id !== c.id);
+    if (other) assert.equal((await fetch(`${site.base}/__review/shots/${other.id}?k=${c.shotKey}`)).status, 401, "a key opens only its own picture");
     const token = (await enter(site.base, "Sara")).token;
-    const withT = await fetch(`${site.base}/__review/shots/${c.id}?t=${encodeURIComponent(token)}`);
-    assert.equal(withT.status, 200);
-    assert.equal(withT.headers.get("content-type"), "image/png");
-    assert.equal((await withT.arrayBuffer()).byteLength > 0, true);
-    const without = await fetch(`${site.base}/__review/shots/${c.id}`);
-    assert.equal(without.status, 401);
+    assert.equal((await fetch(`${site.base}/__review/shots/${c.id}?t=${encodeURIComponent(token)}`)).status, 401, "tokens in addresses are not accepted");
+  });
+
+  test("an unchanged list costs a few bytes; any change brings it again", async () => {
+    const first = await sara("GET", "");
+    assert.ok(first.data.v);
+    const again = await sara("GET", `?v=${encodeURIComponent(first.data.v)}`);
+    assert.deepEqual(again.data, { v: first.data.v, unchanged: true });
+    await omar("POST", "", sample({ text: "Something new" }));
+    const after = await sara("GET", `?v=${encodeURIComponent(first.data.v)}`);
+    assert.ok(Array.isArray(after.data.comments));
+    assert.notEqual(after.data.v, first.data.v);
+    const id = after.data.comments.at(-1).id;
+    const v2 = after.data.v;
+    await omar("PATCH", `/${id}`, { reply: { text: "a reply changes it too" } });
+    assert.notEqual((await sara("GET", `?v=${encodeURIComponent(v2)}`)).data.v, v2);
+  });
+
+  test("text with emoji halves or NUL characters is cleaned, not refused", async () => {
+    const half = "\ud83d"; // the first half of an emoji, alone
+    const { status, data } = await sara("POST", "", sample({ text: `Price ${half}wrong\u0000 here`, target: { label: "a".repeat(199) + "😀" } }));
+    assert.equal(status, 201);
+    assert.equal(data.comment.text, "Price wrong here");
+    assert.ok(!/[\ud800-\udfff]/.test(data.comment.target.label.replace(/[\ud800-\udbff][\udc00-\udfff]/g, "")));
+    assert.equal((await sara("GET", "")).status, 200);
   });
 
   test("a comment without text is refused; unknown kinds and priorities fall back", async () => {
@@ -203,8 +254,7 @@ describe("comments", () => {
     const id = data.comment.id;
     assert.equal((await omar("DELETE", `/${id}`)).status, 403);
     assert.equal((await sara("DELETE", `/${id}`)).status, 204);
-    const token = (await enter(site.base, "Sara")).token;
-    assert.equal((await fetch(`${site.base}/__review/shots/${id}?t=${encodeURIComponent(token)}`)).status, 404);
+    assert.equal((await fetch(`${site.base}/__review/shots/${id}?k=${data.comment.shotKey}`)).status, 404);
     assert.equal((await sara("GET", "")).data.comments.some((c) => c.id === id), false);
   });
 
@@ -312,8 +362,8 @@ describe("on Vercel and Render", () => {
       const again = (await api(second.base, token)("GET", "")).data.comments.find((c) => c.id === data.comment.id);
       assert.ok(again, "the comment is still there");
       assert.equal(again.replies[0].text, "and its reply");
-      const shot = await fetch(`${second.base}/__review/shots/${again.id}?t=${encodeURIComponent(token)}`);
-      assert.equal(shot.status, 200);
+      const shot = await fetch(`${second.base}/__review/shots/${again.id}?k=${again.shotKey}`);
+      assert.equal(shot.status, 200, "the screenshot, by the key the new copy hands out");
     } finally {
       await second.stop({ keepData: false });
     }
