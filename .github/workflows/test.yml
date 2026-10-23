@@ -1,0 +1,37 @@
+# Every push runs the whole test suite twice: once with comments in local
+# files, once in PostgreSQL the way Vercel keeps them (including the site run
+# as the Vercel function). A red cross on GitHub means do not deploy.
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: review_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Tests, comments in local files
+        run: npm test
+      - name: Tests, comments in PostgreSQL (as on Vercel)
+        run: npm test
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:test@localhost:5432/review_test

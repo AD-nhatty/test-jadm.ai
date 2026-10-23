@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>JADM Feedback</title>
+<!--
+  The feedback board: every comment the team pinned on the jadm.ai mirror,
+  newest work first, with its screenshot and what the page reported going
+  wrong. Reads and writes /__review/api/comments.
+-->
+<style>
+  :root {
+    --bg: #f4f4f4; --panel: #fff; --text: #161616; --muted: #525252; --faint: #6f6f6f; --line: #e0e0e0;
+    --field: #f4f4f4; --blue: #0f62fe; --blue-hover: #0353e9; --red: #da1e28; --green: #24a148;
+    --hi-bg: #ffd7d9; --hi-fg: #a2191f; --md-bg: #fcf4d6; --md-fg: #8e6a00; --lo-bg: #e5f6ff; --lo-fg: #00539a;
+    --ok-bg: #defbe6; --ok-fg: #0e6027; --tag: #e0e0e0; --code: #f4f4f4;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161616; --panel: #262626; --text: #f4f4f4; --muted: #c6c6c6; --faint: #a8a8a8; --line: #393939;
+      --field: #393939; --blue: #4589ff; --blue-hover: #6ea6ff; --red: #fa4d56; --green: #42be65;
+      --hi-bg: #520408; --hi-fg: #ffb3b8; --md-bg: #3d3100; --md-fg: #f1c21b; --lo-bg: #012749; --lo-fg: #a6c8ff;
+      --ok-bg: #044317; --ok-fg: #a7f0ba; --tag: #393939; --code: #161616;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #161616; --panel: #262626; --text: #f4f4f4; --muted: #c6c6c6; --faint: #a8a8a8; --line: #393939;
+    --field: #393939; --blue: #4589ff; --blue-hover: #6ea6ff; --red: #fa4d56; --green: #42be65;
+    --hi-bg: #520408; --hi-fg: #ffb3b8; --md-bg: #3d3100; --md-fg: #f1c21b; --lo-bg: #012749; --lo-fg: #a6c8ff;
+    --ok-bg: #044317; --ok-fg: #a7f0ba; --tag: #393939; --code: #161616;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header.top { background: #161616; color: #fff; padding: 0 16px; min-height: 48px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  header.top h1 { font-size: 14px; font-weight: 600; margin: 0; }
+  header.top h1 span { font-weight: 400; color: #c6c6c6; }
+  header.top .spacer { flex: 1; }
+  header.top a, header.top button { background: none; border: 0; color: #c6c6c6; font: inherit; cursor: pointer; padding: 6px 4px; text-decoration: none; }
+  header.top a:hover, header.top button:hover { color: #fff; }
+  header.top .me { color: #c6c6c6; font-size: 13px; }
+  header.top .me b { color: #fff; font-weight: 600; }
+  main { max-width: 1240px; margin: 0 auto; padding: 24px 16px 64px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; background: var(--line); margin-bottom: 24px; }
+  .stat { background: var(--panel); padding: 16px; }
+  .stat .v { font-size: 28px; font-weight: 300; font-variant-numeric: tabular-nums; }
+  .stat .k { font-size: 12px; color: var(--muted); }
+  .stat.alert .v { color: var(--red); }
+  .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin-bottom: 16px; }
+  .filters label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+  .filters select, .filters input { height: 36px; border: 0; border-bottom: 1px solid var(--faint); background: var(--panel); color: var(--text);
+    font: inherit; padding: 0 10px; min-width: 130px; }
+  .filters input { min-width: 220px; }
+  .filters select:focus, .filters input:focus { outline: 2px solid var(--blue); outline-offset: -2px; }
+  .filters .grow { flex: 1; }
+  .btn { height: 36px; border: 0; padding: 0 14px; font: inherit; cursor: pointer; background: var(--blue); color: #fff; }
+  .btn:hover { background: var(--blue-hover); }
+  .btn.ghost { background: var(--panel); color: var(--text); border: 1px solid var(--line); }
+  .btn.ghost:hover { border-color: var(--faint); }
+  .list { display: grid; gap: 12px; }
+  .group h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 20px 0 8px; word-break: break-all; }
+  .item { background: var(--panel); display: grid; grid-template-columns: 240px 1fr; min-height: 150px; border-left: 4px solid var(--line); }
+  .item.p-high { border-left-color: var(--red); }
+  .item.s-fixed, .item.s-wontfix { opacity: .72; border-left-color: var(--green); }
+  .item:target { outline: 2px solid var(--blue); }
+  .thumb { background: var(--field); display: grid; place-items: center; color: var(--faint); font-size: 12px; overflow: hidden; }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; object-position: top left; cursor: zoom-in; display: block; }
+  .content { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .line1 { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; color: var(--faint); }
+  .line1 .num { font-weight: 600; color: var(--text); font-size: 14px; margin-right: 4px; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; background: var(--tag); color: var(--text); font-size: 12px; }
+  .tag.high { background: var(--hi-bg); color: var(--hi-fg); }
+  .tag.medium { background: var(--md-bg); color: var(--md-fg); }
+  .tag.low { background: var(--lo-bg); color: var(--lo-fg); }
+  .tag.fixed { background: var(--ok-bg); color: var(--ok-fg); }
+  .text { margin: 0; white-space: pre-wrap; word-wrap: break-word; font-size: 15px; }
+  .where { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .where code, .tech code { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; }
+  .tech summary { font-size: 12px; color: var(--red); cursor: pointer; }
+  .tech ul { margin: 6px 0 0; padding: 8px 10px 8px 26px; background: var(--code); font-size: 12px; max-height: 180px; overflow: auto; }
+  .tech li { word-break: break-all; }
+  .replies { border-top: 1px solid var(--line); padding-top: 8px; display: grid; gap: 6px; }
+  .reply .who { font-size: 12px; color: var(--faint); }
+  .reply p { margin: 0; white-space: pre-wrap; }
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: auto; padding-top: 4px; }
+  .actions a, .actions button { font: inherit; font-size: 13px; color: var(--blue); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: none; }
+  .actions a:hover, .actions button:hover { text-decoration: underline; }
+  .reply-form { display: none; gap: 8px; }
+  .reply-form.on { display: flex; }
+  .reply-form input { flex: 1; height: 34px; border: 0; border-bottom: 1px solid var(--faint); background: var(--field); color: var(--text); font: inherit; padding: 0 10px; min-width: 0; }
+  .empty { background: var(--panel); padding: 48px 24px; text-align: center; color: var(--muted); }
+  .empty b { display: block; color: var(--text); font-size: 16px; margin-bottom: 4px; }
+  .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.85); display: none; place-items: center; z-index: 10; cursor: zoom-out; padding: 16px; }
+  .lightbox.on { display: grid; }
+  .lightbox img { max-width: 100%; max-height: 100%; box-shadow: 0 4px 32px rgba(0,0,0,.6); }
+  .note { font-size: 12px; color: var(--faint); margin-top: 24px; }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+  @media (max-width: 720px) {
+    .item { grid-template-columns: 1fr; }
+    .thumb { height: 180px; }
+    .filters input { min-width: 0; width: 100%; }
+    .filters label { flex: 1 1 140px; }
+    .filters select { min-width: 0; width: 100%; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <h1>JADM <span>Feedback</span></h1>
+  <div class="spacer"></div>
+  <span class="me" id="me"></span>
+  <a href="/__review/setup">Your Comment button</a>
+  <button type="button" id="theme" title="Switch light or dark">Theme</button>
+  <a href="/" id="open-site" target="_blank" rel="noopener">Open jadm.ai →</a>
+</header>
+<main>
+  <div class="stats" id="stats"></div>
+  <div class="filters">
+    <label>Status<select id="f-status"><option value="open">Open</option><option value="fixed">Fixed</option><option value="wontfix">Won't fix</option><option value="">All</option></select></label>
+    <label>Priority<select id="f-priority"><option value="">All</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
+    <label>Kind<select id="f-kind"><option value="">All</option><option value="bug">Bug</option><option value="design">Design</option><option value="wording">Wording</option><option value="idea">Idea</option><option value="question">Question</option></select></label>
+    <label>Person<select id="f-author"><option value="">Everyone</option></select></label>
+    <label>Group by<select id="f-group"><option value="page">Page</option><option value="none">Nothing (newest first)</option><option value="author">Person</option></select></label>
+    <label class="grow">Search<input id="f-q" type="search" placeholder="Words in the comment or the page"></label>
+    <button class="btn ghost" type="button" id="csv">Download CSV</button>
+  </div>
+  <div class="list" id="list" aria-live="polite"></div>
+  <p class="note">Updates every 15 seconds. Comments are added on jadm.ai with the <b>JADM Comment</b> bookmark button (<a href="/__review/setup">get yours</a>).</p>
+</main>
+<div class="lightbox" id="lightbox"><img alt="Screenshot"></div>
+<script>
+(() => {
+  const BASE = "/__review";
+  const API = `${BASE}/api/comments`;
+  const KIND = { bug: "Bug", design: "Design", wording: "Wording", idea: "Idea", question: "Question" };
+  const PRI = { high: "High", medium: "Medium", low: "Low" };
+  const PRI_ORDER = { high: 0, medium: 1, low: 2 };
+  const $ = (s) => document.querySelector(s);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+  };
+  const when = (iso) => new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  let comments = [];
+  let me = "";
+
+  const theme = store.get("jadm-review-theme");
+  if (theme) document.documentElement.dataset.theme = theme;
+  $("#theme").addEventListener("click", () => {
+    const dark = document.documentElement.dataset.theme
+      ? document.documentElement.dataset.theme === "dark"
+      : matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.dataset.theme = dark ? "light" : "dark";
+    store.set("jadm-review-theme", document.documentElement.dataset.theme);
+  });
+
+  // The address that reopens a comment's spot: its page, on the site it was
+  // written on (the real jadm.ai, or this mirror), with ?review-focus, which
+  // the widget reads to scroll there and open the comment.
+  function focusUrl(c) {
+    try {
+      const u = new URL(c.page.url || "/", c.page.origin || location.origin);
+      u.searchParams.set("review-focus", c.id);
+      return u.href;
+    } catch { return "/"; }
+  }
+  const onJadm = (c) => Boolean(c.page.origin) && c.page.origin !== location.origin;
+  const pageName = (c) => c.page.key || "/";
+
+  async function load() {
+    try {
+      const r = await fetch(API, { cache: "no-store", credentials: "same-origin" });
+      if (r.status === 401) { location.href = `${BASE}/enter?next=${encodeURIComponent(BASE + "/")}`; return; }
+      if (!r.ok) throw new Error();
+      comments = (await r.json()).comments || [];
+      render();
+    } catch {
+      $("#list").innerHTML = '<div class="empty"><b>Could not load the feedback</b>Check the connection; it retries by itself.</div>';
+    }
+  }
+
+  function filtered() {
+    const s = $("#f-status").value, p = $("#f-priority").value, k = $("#f-kind").value, a = $("#f-author").value;
+    const q = $("#f-q").value.trim().toLowerCase();
+    return comments
+      .filter((c) => (!s || c.status === s) && (!p || c.priority === p) && (!k || c.kind === k) && (!a || c.author === a))
+      .filter((c) => !q || [c.text, c.page.key, c.page.title, c.target.label, ...(c.replies || []).map((r) => r.text)].join(" ").toLowerCase().includes(q))
+      .sort((x, y) => PRI_ORDER[x.priority] - PRI_ORDER[y.priority] || y.n - x.n);
+  }
+
+  function renderStats() {
+    const open = comments.filter((c) => c.status === "open");
+    const people = new Set(comments.map((c) => c.author));
+    $("#stats").innerHTML = [
+      ["Open", open.length, false],
+      ["High priority open", open.filter((c) => c.priority === "high").length, true],
+      ["Fixed", comments.filter((c) => c.status === "fixed").length, false],
+      ["Pages with open issues", new Set(open.map(pageName)).size, false],
+      ["People commenting", people.size, false],
+    ].map(([k, v, alert]) => `<div class="stat${alert && v ? " alert" : ""}"><div class="v">${v}</div><div class="k">${k}</div></div>`).join("");
+    const sel = $("#f-author"), cur = sel.value;
+    sel.innerHTML = '<option value="">Everyone</option>' + [...people].sort().map((p) => `<option${p === cur ? " selected" : ""}>${esc(p)}</option>`).join("");
+  }
+
+  function item(c) {
+    const status = c.status === "open" ? "" : `<span class="tag fixed">${c.status === "fixed" ? "Fixed" : "Won't fix"}${c.statusBy ? ` by ${esc(c.statusBy)}` : ""}</span>`;
+    const tech = c.tech || [];
+    return `<article class="item p-${c.priority} s-${c.status}" id="c${c.n}" data-id="${esc(c.id)}">
+      <div class="thumb">${c.shot ? `<img loading="lazy" src="${BASE}/shots/${encodeURIComponent(c.id)}" alt="Screenshot of #${c.n}">` : "No screenshot"}</div>
+      <div class="content">
+        <div class="line1"><span class="num">#${c.n}</span><span class="tag">${KIND[c.kind] || esc(c.kind)}</span><span class="tag ${c.priority}">${PRI[c.priority]}</span>${status}
+          <span>${esc(c.author)} · ${when(c.createdAt)}</span></div>
+        <p class="text">${esc(c.text)}</p>
+        <div class="where" title="${esc(c.target.selector)}">On <b>${esc(c.target.label || "the page")}</b> · <code>${esc(pageName(c))}</code> · screen ${c.viewport.w}×${c.viewport.h}</div>
+        ${tech.length ? `<details class="tech"><summary>${tech.length} technical problem${tech.length > 1 ? "s" : ""} on this screen when the comment was written</summary><ul>${tech.map((t) => `<li><code>[${esc(t.type)}] ${esc(t.text)}</code></li>`).join("")}</ul></details>` : ""}
+        ${(c.replies || []).length ? `<div class="replies">${c.replies.map((r) => `<div class="reply"><div class="who">${esc(r.author)} · ${when(r.at)}</div><p>${esc(r.text)}</p></div>`).join("")}</div>` : ""}
+        <div class="actions">
+          <a href="${esc(focusUrl(c))}" target="_blank" rel="noopener"${onJadm(c) ? ' title="Opens jadm.ai. Click your JADM Comment button there to see the pin."' : ""}>Show on the page</a>
+          <button type="button" data-act="status">${c.status === "open" ? "Mark fixed" : "Reopen"}</button>
+          ${c.status === "open" ? '<button type="button" data-act="wontfix">Won\'t fix</button>' : ""}
+          <button type="button" data-act="reply">Reply</button>
+          ${c.author === me ? '<button type="button" data-act="delete">Delete</button>' : ""}
+        </div>
+        <form class="reply-form"><input placeholder="Reply as ${esc(me)}…" maxlength="4000" aria-label="Reply"><button class="btn" type="submit">Send</button></form>
+      </div>
+    </article>`;
+  }
+
+  function render() {
+    // Keep what someone is in the middle of: an open reply with its text and
+    // cursor, and opened technical details.
+    const keep = new Map();
+    document.querySelectorAll("#list .item").forEach((el) => {
+      const f = el.querySelector(".reply-form");
+      const d = el.querySelector("details.tech");
+      keep.set(el.dataset.id, {
+        reply: f.classList.contains("on") ? f.querySelector("input").value : null,
+        focus: f.contains(document.activeElement),
+        tech: Boolean(d && d.open),
+      });
+    });
+    draw();
+    for (const [id, s] of keep) {
+      const el = document.querySelector(`#list .item[data-id="${CSS.escape(id)}"]`);
+      if (!el) continue;
+      const d = el.querySelector("details.tech");
+      if (s.tech && d) d.open = true;
+      if (s.reply !== null) {
+        const f = el.querySelector(".reply-form");
+        f.classList.add("on");
+        const input = f.querySelector("input");
+        input.value = s.reply;
+        if (s.focus) input.focus();
+      }
+    }
+  }
+
+  function draw() {
+    renderStats();
+    const rows = filtered();
+    if (!rows.length) {
+      $("#list").innerHTML = comments.length
+        ? '<div class="empty"><b>Nothing matches these filters</b>Try Status: All.</div>'
+        : '<div class="empty"><b>No comments yet</b>Open jadm.ai, click your <b>JADM Comment</b> bookmark, and use the Comment button at the bottom right of any screen. <a href="/__review/setup">Get your button</a></div>';
+      return;
+    }
+    const by = $("#f-group").value;
+    if (by === "none") {
+      $("#list").innerHTML = rows.sort((x, y) => y.n - x.n).map(item).join("");
+    } else {
+      const groups = new Map();
+      for (const c of rows) {
+        const g = by === "page" ? pageName(c) : c.author;
+        if (!groups.has(g)) groups.set(g, []);
+        groups.get(g).push(c);
+      }
+      $("#list").innerHTML = [...groups].map(([g, list]) =>
+        `<section class="group"><h2>${esc(g)} · ${list.length}</h2><div class="list">${list.map(item).join("")}</div></section>`).join("");
+    }
+    if (location.hash && !scrolledToHash) {
+      const target = document.getElementById(location.hash.slice(1));
+      if (target) { target.scrollIntoView({ block: "center" }); scrolledToHash = true; }
+    }
+  }
+  let scrolledToHash = false;
+
+  async function call(method, id, body) {
+    const r = await fetch(`${API}/${id}`, {
+      method, credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!r.ok && r.status !== 204) { alert("Could not save. Try again."); return false; }
+    if (method === "DELETE") comments = comments.filter((c) => c.id !== id);
+    else {
+      const { comment } = await r.json();
+      comments = comments.map((c) => (c.id === id ? comment : c));
+    }
+    render();
+    return true;
+  }
+
+  $("#list").addEventListener("click", (e) => {
+    const img = e.target.closest(".thumb img");
+    if (img) {
+      $("#lightbox img").src = img.src;
+      $("#lightbox").classList.add("on");
+      return;
+    }
+    const btn = e.target.closest("button[data-act]");
+    if (!btn) return;
+    const card = btn.closest(".item");
+    const c = comments.find((x) => x.id === card.dataset.id);
+    if (btn.dataset.act === "status") call("PATCH", c.id, { status: c.status === "open" ? "fixed" : "open" });
+    if (btn.dataset.act === "wontfix") call("PATCH", c.id, { status: "wontfix" });
+    if (btn.dataset.act === "delete" && confirm(`Delete comment #${c.n}? This cannot be undone.`)) call("DELETE", c.id);
+    if (btn.dataset.act === "reply") {
+      const f = card.querySelector(".reply-form");
+      f.classList.toggle("on");
+      f.querySelector("input").focus();
+    }
+  });
+  $("#list").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const id = form.closest(".item").dataset.id;
+    const text = form.querySelector("input").value.trim();
+    if (!text) return;
+    // Closed before the save re-renders the list, so the sent text is not kept;
+    // put back if the save fails.
+    form.classList.remove("on");
+    if (!(await call("PATCH", id, { reply: { text } }))) {
+      const again = document.querySelector(`#list .item[data-id="${CSS.escape(id)}"] .reply-form`);
+      if (again) {
+        again.classList.add("on");
+        again.querySelector("input").value = text;
+      }
+    }
+  });
+  $("#lightbox").addEventListener("click", () => $("#lightbox").classList.remove("on"));
+  addEventListener("keydown", (e) => { if (e.key === "Escape") $("#lightbox").classList.remove("on"); });
+  for (const id of ["#f-status", "#f-priority", "#f-kind", "#f-author", "#f-group"]) $(id).addEventListener("change", render);
+  $("#f-q").addEventListener("input", render);
+
+  $("#csv").addEventListener("click", () => {
+    const cols = ["#", "Status", "Priority", "Kind", "Person", "When", "Comment", "Page", "Element", "Screen", "Technical problems", "Replies", "Screenshot", "Link"];
+    // A cell starting with = + - @ is run as a formula by Excel; the apostrophe keeps it text.
+    const q = (v) => {
+      let s = String(v ?? "");
+      if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+      return `"${s.replace(/"/g, '""')}"`;
+    };
+    const lines = [cols.map(q).join(",")].concat(filtered().map((c) => [
+      c.n, c.status, c.priority, c.kind, c.author, c.createdAt, c.text, c.page.key, c.target.label, `${c.viewport.w}x${c.viewport.h}`,
+      (c.tech || []).map((t) => `[${t.type}] ${t.text}`).join(" | "),
+      (c.replies || []).map((r) => `${r.author}: ${r.text}`).join(" | "),
+      c.shot ? `${location.origin}${BASE}/shots/${c.id}` : "", focusUrl(c),
+    ].map(q).join(",")));
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv" }));
+    a.download = `jadm-feedback-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+  });
+
+  fetch(`${BASE}/api/me`, { credentials: "same-origin" })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((d) => {
+      if (!d) return;
+      me = d.name;
+      $("#me").innerHTML = `Reviewing as <b>${esc(me)}</b> · <a href="${BASE}/leave">not you?</a>`;
+      if (!d.mirror && d.target) $("#open-site").href = d.target + "/";
+      render();
+    })
+    .catch(() => {});
+  load();
+  setInterval(() => { if (!document.hidden) load(); }, 15000);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+# One-click deploy on Render (render.com): New → Blueprint → pick this repo.
+# Creates the mirror (a free web service) and a free PostgreSQL for the comments.
+# Render asks for TEAM_PASSWORD while it sets up; the rest fills itself in.
+services:
+  - type: web
+    name: jadm-review
+    runtime: node
+    plan: free
+    buildCommand: npm install --omit=dev
+    startCommand: node server.js
+    healthCheckPath: /__review/health
+    envVars:
+      - key: TARGET_URL
+        value: https://jadm.ai
+      - key: TEAM_PASSWORD
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: jadm-review-db
+          property: connectionString
+
+databases:
+  - name: jadm-review-db
+    plan: free
