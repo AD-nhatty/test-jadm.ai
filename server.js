@@ -358,7 +358,9 @@ function bookmarklet(token, origin) {
     `if(window.__jadmReview){window.__jadmReview.setToken&&window.__jadmReview.setToken(${JSON.stringify(token)});return}` +
     `window.__jadmReviewToken=${JSON.stringify(token)};` +
     `var s=document.createElement("script");s.src=${JSON.stringify(`${origin}${P}/widget.js`)}+"?v="+Date.now();` +
-    `s.onerror=function(){alert("The review site did not answer. Open the review link once to wake it, then try again.")};` +
+    // Names the address it tried, so a button made on another copy of the
+    // site (a local one, say) is easy to tell apart.
+    `s.onerror=function(){alert(${JSON.stringify(`The review site (${new URL(origin || "http://unknown").host}) did not answer. Open ${origin || "the review link"} once, then click JADM Comment again. If it still fails, get a new button from the review link.`)})};` +
     `document.body.appendChild(s)})()`;
   return `javascript:${encodeURIComponent(code)}`;
 }
@@ -401,6 +403,7 @@ textarea{width:100%;height:84px;margin-top:8px;font:12px/1.4 ui-monospace,monosp
 <li style="background:none;padding:0;margin:2px 0;counter-increment:none"><b>Safari:</b> bookmark any page (<kbd>⌘</kbd> + <kbd>D</kbd>), then in <i>Bookmarks → Edit Bookmarks</i> change its address to this</li>
 </ul>
 <textarea readonly id="code">${esc(href)}</textarea><button class="copy" type="button" id="copy">Copy</button></details>
+<p class="foot">This button works with <b>${esc(new URL(origin || "http://unknown").host)}</b>. Already have a JADM Comment bookmark from somewhere else? Delete it and use this one.</p>
 <p class="foot">This button is yours: it signs comments as ${esc(name)}, so do not send it to anyone. · <a href="${P}/">See all feedback</a> · <a href="${P}/leave">Not ${esc(name)}?</a></p>
 </main><script>
 document.getElementById("bm").addEventListener("click",function(e){e.preventDefault();alert("Drag this button up to your bookmarks bar, then click it while you are on ${esc(site)}.")});
