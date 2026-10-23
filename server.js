@@ -394,6 +394,7 @@ textarea{width:100%;height:84px;margin-top:8px;font:12px/1.4 ui-monospace,monosp
 <p>Hold it with the mouse and drop it on the bar at the top of the browser.</p></li>
 <li><b>Open ${esc(site)} and sign in like you always do</b><p>Google is fine. <a href="${esc(TARGET.origin)}/" target="_blank" rel="noopener">Open ${esc(site)}</a></p></li>
 <li><b>Click “JADM Comment” in your bookmarks bar</b><p>The <b>Comment</b> button and everyone's pins appear at the bottom right. After you reload a page, click it once more.</p></li>
+<li><b>Press Comment, then click the spot</b><p>Chrome and Edge ask to <b>share this tab</b>: press <b>Share</b>. That takes one exact picture of your screen when you click the spot, with a red circle on it, and stops straight away. Nothing is recorded.</p></li>
 </ol>
 <details><summary>Cannot drag it? Add it by hand</summary>
 <p>Press <b>Copy</b>, then make a new bookmark named <b>JADM Comment</b> and paste this as its address (URL):</p>
@@ -481,8 +482,15 @@ async function own(req, res, url, name) {
         target: {
           selector: str(target.selector, 1000),
           label: str(target.label, 200),
+          // How the widget recognises the element again (its words, numbers
+          // left out), and where on it the spot is.
+          key: str(target.key, 200),
           xPct: num(target.xPct),
           yPct: num(target.yPct),
+          dx: num(target.dx),
+          dy: num(target.dy),
+          w: num(target.w),
+          h: num(target.h),
           pageX: num(target.pageX),
           pageY: num(target.pageY),
         },

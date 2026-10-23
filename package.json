@@ -2,7 +2,7 @@
   "name": "jadm-review",
   "version": "1.0.0",
   "private": true,
-  "description": "A live mirror of jadm.ai where the review team pins comments on any screen.",
+  "description": "Pin comments on the live jadm.ai, shared with the review team.",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -14,5 +14,8 @@
   },
   "dependencies": {
     "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "playwright-core": "1.64.0"
   }
 }

@@ -139,6 +139,15 @@
       transform-origin: 0 100%; background: #da1e28; border: 2px solid #fff; box-shadow: 0 1px 6px rgba(0,0,0,.4); pointer-events: auto;
       cursor: pointer; display: grid; place-items: center; z-index: 2147483001; padding: 0; }
     .pin b { transform: rotate(45deg); color: #fff; font-size: 12px; font-weight: 600; }
+    .pin[data-count]::after { content: attr(data-count); position: absolute; top: -8px; right: -8px; transform: rotate(45deg);
+      min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: #161616; color: #fff; font-size: 10px;
+      font-weight: 600; line-height: 16px; text-align: center; }
+    .card .preview { margin-top: 10px; font-size: 12px; color: #525252; }
+    .card .preview img { display: block; width: 100%; border: 1px solid #e0e0e0; margin-bottom: 4px; }
+    .card .choice { display: block; width: 100%; text-align: left; border: 0; border-bottom: 1px solid #e0e0e0; background: #fff;
+      padding: 10px 4px; font-size: 14px; color: #161616; cursor: pointer; }
+    .card .choice:hover { background: #f4f4f4; }
+    .card .choice span { color: #525252; font-size: 13px; }
     .pin.fixed { background: #24a148; }
     .pin.wontfix { background: #6f6f6f; }
     .pin.flash { animation: flash 0.6s ease-in-out 4; }
@@ -345,44 +354,147 @@
     return parts.join(" > ");
   }
 
-  function describe(node) {
-    const text = (node.getAttribute("aria-label") || node.innerText || node.getAttribute("placeholder") || node.getAttribute("alt") || "")
+  // What an element says: its label, its text (for a chart, its axis labels).
+  const ownText = (n) =>
+    (n.getAttribute?.("aria-label") || (n instanceof SVGElement ? n.textContent : n.innerText) || n.getAttribute?.("placeholder") || n.getAttribute?.("alt") || "")
       .replace(/\s+/g, " ")
       .trim();
+  const clip = (t) => `${t.slice(0, 80)}${t.length > 80 ? "…" : ""}`;
+  const hasOwnText = (e) => [...e.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim());
+
+  // The element in words, shown as "On: …" and kept with the comment. One
+  // that says nothing itself (an icon) is named by what it sits in:
+  // 'svg in a · "Overdue, not on the ladder"'.
+  function describe(node) {
     const tag = node.tagName.toLowerCase();
-    return text ? `${tag} · "${text.slice(0, 80)}${text.length > 80 ? "…" : ""}"` : tag;
+    const text = ownText(node);
+    if (text) return `${tag} · "${clip(text)}"`;
+    const named = node.parentElement?.closest("a,button,[role],li,tr,td,th,label,h1,h2,h3,h4,h5,h6,section");
+    const t = named ? ownText(named) : "";
+    return t ? `${tag} in ${named.tagName.toLowerCase()} · "${clip(t)}"` : tag;
+  }
+  // The same, with numbers taken out: how a comment recognises its element
+  // again even after a count or an amount on it has changed, while a
+  // different element (another bubble, another row) never passes.
+  const fingerprint = (node) => describe(node).replace(/\d[\d.,]*/g, "#");
+
+  // An element as big as the window: an invisible layer laid over the page
+  // (jadm.ai has one), or the page background. Never what a reviewer means.
+  const pageSized = (r) => r.width >= innerWidth * 0.9 && r.height >= innerHeight * 0.9;
+
+  // Things laid over the page that are not content: a see-through layer, a
+  // dimming backdrop behind a menu or dialog. Looked through, never picked.
+  function isVeil(e) {
+    const r = e.getBoundingClientRect();
+    if (pageSized(r)) return true;
+    const area = r.width * r.height;
+    const screen = innerWidth * innerHeight;
+    if (e.matches?.('[class*="scrim"],[class*="backdrop"]') && area >= 0.5 * screen) return true;
+    const pos = getComputedStyle(e).position;
+    return (pos === "fixed" || pos === "absolute") && area >= 0.8 * screen && !ownText(e) && !e.querySelector("img,svg,canvas,video");
   }
 
-  // The element only when the selector names exactly one; otherwise the spot
-  // where it was clicked, so a pin never lands on a look-alike elsewhere.
-  function uniqueMatch(sel) {
+  // The element painted on top at a point, past the widget and any veil.
+  const topAt = (x, y) => document.elementsFromPoint(x, y).find((e) => e !== host && e !== document.documentElement && e !== document.body && !isVeil(e)) || null;
+
+  // What is under the pointer, as the reviewer sees it: the element painted
+  // on top there (past veils), or the nearest thing around it that is real
+  // content — text, a control, a picture, a chart. Never something lying
+  // underneath what is on top (under a glass top bar, say). Empty space
+  // inside a card is the card, not the whole page grid.
+  function pickTarget(x, y) {
+    const top = topAt(x, y);
+    if (!top) return document.body;
+    const content = (e) => e.matches?.("a,button,input,select,textarea,label,summary,img,svg,video,canvas,[role]") || hasOwnText(e);
+    let hit = null;
+    for (let e = top; e && e !== document.body; e = e.parentElement) {
+      if (content(e)) {
+        hit = e;
+        break;
+      }
+    }
+    if (!hit) hit = top.closest("section, article, [class*='card'], header, aside, nav") || top;
+    return stableTarget(hit);
+  }
+
+  // Whether a point on an element can really be seen right now: the element
+  // is visible, the point is inside every box that clips it (a scrolling
+  // sidebar, a folded group), and nothing else is painted over it there (the
+  // top bar, a menu). Otherwise no pin: a pin is never drawn on something else.
+  function placeable(n, x, y) {
+    if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return false;
+    if (n.checkVisibility && !n.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return false;
+    for (let a = n.parentElement; a && a !== document.documentElement; a = a.parentElement) {
+      const cs = getComputedStyle(a);
+      if (cs.overflowX !== "visible" || cs.overflowY !== "visible") {
+        const r = a.getBoundingClientRect();
+        if (x < r.left - 1 || x > r.right + 1 || y < r.top - 1 || y > r.bottom + 1) return false;
+      }
+      if (cs.position === "fixed") break;
+    }
+    const top = topAt(x, y);
+    if (!top) return false;
+    return top === n || n.contains(top) || (getComputedStyle(n).pointerEvents === "none" && top.contains(n));
+  }
+
+  // What a reviewer points at, as something that stays put. Inside a chart
+  // the element under the pointer is often a line or a hover dot that the
+  // chart redraws or removes; the chart as a whole is what stays, so the spot
+  // is kept relative to the outermost <svg>.
+  function stableTarget(n) {
+    if (!(n instanceof SVGElement)) return n;
+    let svg = n.closest("svg");
+    while (svg?.parentElement?.closest("svg")) svg = svg.parentElement.closest("svg");
+    return svg || n;
+  }
+
+  // The element a comment was made on, if it is on the screen now: its path
+  // must name it, and it must still be the same element (its fingerprint).
+  // Several matches, none, or one that is now something else all count as
+  // "not here": a pin is never drawn on a look-alike.
+  function targetNode(c) {
+    const sel = c.target.selector;
     if (!sel) return null;
+    let all;
     try {
-      const all = document.querySelectorAll(sel);
-      return all.length === 1 ? all[0] : null;
+      all = [...document.querySelectorAll(sel)];
     } catch {
       return null; // a selector this page cannot parse
     }
+    const same = all.filter((n) => isItsElement(n, c));
+    return same.length === 1 ? same[0] : null;
   }
 
-  // Where a comment's spot is on the screen now, or null when its element is
-  // not on screen. jadm.ai shows different things at one address (the sign-in
-  // page and the dashboard are both "/"), so a pin only appears with the
-  // element it was made on; it never floats over something else.
+  function isItsElement(n, c) {
+    if (c.target.key) return fingerprint(n) === c.target.key;
+    // Saved before fingerprints: only an element that said something can be
+    // recognised; a bare "svg" or "div" could be any of many.
+    return Boolean(c.target.label?.includes("·")) && describe(n) === c.target.label;
+  }
+
+  // Where a comment's spot is on the screen now, or null when it cannot be
+  // shown exactly: its element is not here, is hidden or covered, or the
+  // spot no longer falls inside it. jadm.ai shows different things at one
+  // address (the sign-in page and the dashboard are both "/"), so a pin only
+  // appears with the element it was made on; it never floats over something else.
   function findTarget(c) {
-    const sel = c.target.selector;
-    if (sel) {
-      let all = null;
-      try {
-        all = document.querySelectorAll(sel);
-      } catch { /* a selector this page cannot parse */ }
-      if (all && all.length === 0) return null;
-      if (all && all.length === 1) {
-        const r = all[0].getBoundingClientRect();
-        return r.width || r.height ? { x: r.left + r.width * c.target.xPct, y: r.top + r.height * c.target.yPct } : null;
-      }
+    const n = targetNode(c);
+    if (!n) return null;
+    const r = n.getBoundingClientRect();
+    if (!r.width || !r.height || pageSized(r)) return null;
+    const t = c.target;
+    // A big box (a card, empty space) keeps the spot by its distance from the
+    // box's top-left corner: rows below may grow without moving it. Anything
+    // else by its share of the box.
+    const big = r.width > 400 || r.height > 300;
+    let p;
+    if (big && Number.isFinite(t.dx) && Number.isFinite(t.dy)) {
+      if (t.dx > r.width || t.dy > r.height) return null;
+      p = { x: r.left + t.dx, y: r.top + t.dy };
+    } else {
+      p = { x: r.left + r.width * t.xPct, y: r.top + r.height * t.yPct };
     }
-    return { x: c.target.pageX - scrollX, y: c.target.pageY - scrollY };
+    return placeable(n, p.x, p.y) ? p : null;
   }
   const cardSpot = () => ({ x: innerWidth / 2 - 170, y: 120 });
 
@@ -396,16 +508,37 @@
   // Pins are kept and moved, not rebuilt: a pin replaced between press and
   // release never gets its click, which on a phone is most taps.
   const pinEls = new Map(); // comment id -> pin button
+  const pinSpots = new Map(); // comment id -> {x, y} where its pin is drawn
+  // Every pin sits exactly on its own spot. Pins on (nearly) the same spot
+  // overlap; clicking there lists every comment at that spot to choose from.
+  const near = (a, b) => Math.abs(a.x - b.x) < 24 && Math.abs(a.y - b.y) < 24;
   layer.addEventListener("click", (e) => {
     const pin = e.target.closest?.(".pin");
     if (!pin) return;
     e.stopPropagation();
-    const c = comments.find((v) => v.id === pin.dataset.id);
-    if (c) {
-      const { x, y } = findTarget(c) || cardSpot();
-      showComment(c.id, x, y);
-    }
+    const at = pinSpots.get(pin.dataset.id);
+    if (!at) return;
+    const here = [...pinSpots].filter(([, p]) => near(p, at)).map(([id]) => comments.find((v) => v.id === id)).filter(Boolean);
+    if (here.length > 1) chooseComment(here, at.x, at.y);
+    else showComment(pin.dataset.id, at.x, at.y);
   });
+
+  function chooseComment(list, x, y) {
+    if (!closeCard()) return;
+    const card = el("div", "card");
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-label", "Comments on this spot");
+    card.innerHTML = `<header><span>${list.length} comments on this spot</span><button type="button" aria-label="Close">×</button></header>
+      <div class="body">${list
+        .sort((a, b) => a.n - b.n)
+        .map(
+          (c) => `<button type="button" class="choice" data-id="${esc(c.id)}"><b>#${c.n}</b> ${esc(c.author)}${c.status === "open" ? "" : ` · ${c.status === "fixed" ? "fixed" : "won't fix"}`}<br><span>${esc(c.text.slice(0, 90))}${c.text.length > 90 ? "…" : ""}</span></button>`,
+        )
+        .join("")}</div>`;
+    card.querySelector("header button").addEventListener("click", () => closeCard({ force: true }));
+    card.querySelectorAll(".choice").forEach((b) => b.addEventListener("click", () => showComment(b.dataset.id, x, y)));
+    placeCard(card, x, y);
+  }
 
   function renderPins() {
     const mine = onThisPage();
@@ -414,16 +547,19 @@
     pinsBtn.title = `${open} open on this page (${mine.length} in all). Click to ${pinsHidden ? "show" : "hide"} the pins.`;
     pinsBtn.style.opacity = pinsHidden ? "0.6" : "1";
     const shown = new Set();
-    const placed = [];
+    pinSpots.clear();
     if (!pinsHidden && !picking) {
+      const placed = [];
       for (const c of mine) {
         const at = findTarget(c);
         if (!at) continue;
-        let { x, y } = at;
-        // Two comments on the same spot sit side by side, so both can be clicked.
-        while (placed.some((p) => Math.abs(p.x - x) < 24 && Math.abs(p.y - y) < 24)) x += 26;
-        placed.push({ x, y });
+        const { x, y } = at;
         if (x < -20 || y < -20 || x > innerWidth + 20 || y > innerHeight + 20) continue;
+        placed.push([c, at]);
+      }
+      for (const [c, at] of placed) {
+        const { x, y } = at;
+        pinSpots.set(c.id, at);
         shown.add(c.id);
         let pin = pinEls.get(c.id);
         if (!pin) {
@@ -438,8 +574,11 @@
         if (pin.textContent !== String(c.n)) pin.innerHTML = `<b>${c.n}</b>`;
         pin.style.left = `${x}px`;
         pin.style.top = `${y}px`;
-        pin.title = `#${c.n} ${c.author}: ${c.text.slice(0, 120)}`;
-        pin.setAttribute("aria-label", `Comment ${c.n} by ${c.author}`);
+        const together = placed.filter(([, p]) => near(p, at)).length;
+        if (together > 1) pin.dataset.count = String(together);
+        else delete pin.dataset.count;
+        pin.title = together > 1 ? `${together} comments here` : `#${c.n} ${c.author}: ${c.text.slice(0, 120)}`;
+        pin.setAttribute("aria-label", together > 1 ? `${together} comments on this spot` : `Comment ${c.n} by ${c.author}`);
       }
     }
     for (const [id, pin] of pinEls) {
@@ -475,6 +614,178 @@
   setInterval(() => { if (!document.hidden) refresh(); }, 15000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 
+  // --- exact pictures ------------------------------------------------------
+  /*
+   * Chrome and Edge can photograph this very tab, pixel for pixel, the way
+   * screen sharing does (getDisplayMedia with preferCurrentTab). Pressing
+   * Comment asks "Share this tab?"; the picture is then taken from the real
+   * screen at the moment the spot is clicked, and sharing stops at once.
+   * Cancelled, or another browser: the drawn picture (capture, below).
+   * The first time, the reviewer is told what the question is about.
+   */
+  const EXACT_KEY = "jadm-review-exact"; // "on", "off", or unset (not asked yet)
+  const exactPossible =
+    Boolean(navigator.mediaDevices?.getDisplayMedia) && /Chrome\/|Edg\//.test(navigator.userAgent) && !/Mobile|Android/.test(navigator.userAgent);
+  let exactRefused = store.get(EXACT_KEY) === "off";
+  let tabStream = null;
+
+  function openTabCapture() {
+    if (!exactPossible || exactRefused) return Promise.resolve(null);
+    return navigator.mediaDevices
+      .getDisplayMedia({
+        video: { displaySurface: "browser" },
+        audio: false,
+        preferCurrentTab: true,
+        selfBrowserSurface: "include",
+        surfaceSwitching: "exclude",
+        monitorTypeSurfaces: "exclude",
+      })
+      .then(
+        (s) => {
+          tabStream = s;
+          s.getVideoTracks()[0]?.addEventListener("ended", () => {
+            if (tabStream === s) tabStream = null;
+          });
+          return s;
+        },
+        // Cancel: not asked again on this page; the drawn picture is used.
+        () => {
+          exactRefused = true;
+          return null;
+        },
+      );
+  }
+
+  function closeTabCapture() {
+    tabStream?.getTracks().forEach((t) => t.stop());
+    tabStream = null;
+  }
+
+  // When the page last scrolled, anywhere on it.
+  let lastScrollAt = 0;
+  addEventListener("scroll", () => (lastScrollAt = performance.now()), { capture: true, passive: true });
+  const frame1 = () => new Promise((r) => requestAnimationFrame(r));
+
+  // Waits until nothing moves: no scrolling for a moment, and the clicked
+  // element in the same place for three frames in a row (a wheel flick keeps
+  // the page gliding after the click). Gives up after a second.
+  async function stillness(n) {
+    const t0 = performance.now();
+    let prev = "";
+    let same = 0;
+    while (performance.now() - t0 < 1000) {
+      await frame1();
+      const r = n.getBoundingClientRect();
+      const now = `${scrollX},${scrollY},${r.left},${r.top},${r.width},${r.height}`;
+      same = now === prev && performance.now() - lastScrollAt > 120 ? same + 1 : 0;
+      prev = now;
+      if (same >= 3) return now;
+    }
+    return null;
+  }
+
+  // The exact picture: one frame of this tab, with the circle placed from
+  // where the clicked element is in that same frame. Any doubt — the page
+  // would not settle, the element moved while the frame was taken, the frame
+  // is not this page — and it returns nothing, so the drawn picture is used.
+  async function grabTab(stream, spot, n) {
+    const track = stream.getVideoTracks()[0];
+    let video = null;
+    try {
+      if (!track || track.readyState !== "live" || !n?.isConnected) return null;
+      // The widget is not part of the picture: hide it, let the screen redraw.
+      host.style.visibility = "hidden";
+      const before = await stillness(n);
+      if (!before) return null;
+      const r = n.getBoundingClientRect();
+      const p = { x: r.left + r.width * spot.xPct, y: r.top + r.height * spot.yPct };
+      // Tab-capture frames arrive a frame or two late.
+      await frame1();
+      await frame1();
+      await new Promise((res) => setTimeout(res, 100));
+      let frame;
+      if ("ImageCapture" in window) {
+        frame = await new ImageCapture(track).grabFrame();
+      } else {
+        video = document.createElement("video");
+        video.muted = true;
+        video.srcObject = stream;
+        await video.play();
+        await new Promise((res) => (video.requestVideoFrameCallback ? video.requestVideoFrameCallback(() => res()) : setTimeout(res, 120)));
+        frame = video;
+      }
+      const r2 = n.getBoundingClientRect();
+      if (`${scrollX},${scrollY},${r2.left},${r2.top},${r2.width},${r2.height}` !== before) return null;
+      const fw = frame.width || frame.videoWidth;
+      const fh = frame.height || frame.videoHeight;
+      // It must be this page's own area: the same shape as the window's inside.
+      if (!fw || !fh || Math.abs(fw / innerWidth - fh / innerHeight) / (fw / innerWidth) > 0.03) return null;
+      const out = Math.min(1, 1600 / fw);
+      const c = document.createElement("canvas");
+      c.width = Math.round(fw * out);
+      c.height = Math.round(fh * out);
+      const g = c.getContext("2d");
+      g.drawImage(frame, 0, 0, c.width, c.height);
+      const k = c.width / innerWidth;
+      ring(g, p.x * k, p.y * k, k);
+      window.__jadmReviewLastMark = { x: p.x, y: p.y, k, exact: true, marked: true, clientX: spot.clientX, clientY: spot.clientY };
+      return { url: c.toDataURL("image/jpeg", 0.85), marked: true };
+    } catch {
+      return null;
+    } finally {
+      host.style.visibility = "";
+      stream.getTracks().forEach((t) => t.stop());
+      if (video) video.srcObject = null;
+    }
+  }
+
+  // The red circle, in plain picture pixels.
+  function ring(g, x, y, k) {
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.lineWidth = Math.max(3, 4 * k);
+    g.strokeStyle = "#da1e28";
+    g.beginPath();
+    g.arc(x, y, Math.max(14, 22 * k), 0, Math.PI * 2);
+    g.stroke();
+  }
+
+  // The Comment button. In Chrome/Edge, the first time, a short explanation
+  // of the "Share this tab?" question comes first; its Continue click is what
+  // lets the page ask.
+  async function beginComment() {
+    if (!closeCard()) return;
+    if (exactPossible && !exactRefused && !store.get(EXACT_KEY)) return explainExact();
+    if (exactPossible && !exactRefused) await openTabCapture();
+    startPick();
+  }
+
+  function explainExact() {
+    const card = el("div", "card");
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-label", "Exact screenshots");
+    card.innerHTML = `<header><span>Exact screenshots</span><button type="button" aria-label="Close">×</button></header>
+      <div class="body">
+        <p class="text">So your comment comes with an exact picture of what you see, your browser will ask to <b>share this tab</b>. Press <b>Share</b>.</p>
+        <p class="text" style="color:#525252">It takes one picture of this screen when you click your spot, then stops at once. Nothing is recorded, and only your comment's picture is saved.</p>
+        <div class="row"><button type="button" class="ghost" data-quick>Quick pictures instead</button><button type="button" class="go" data-exact>Continue</button></div>
+      </div>`;
+    card.querySelector("header button").addEventListener("click", () => closeCard({ force: true }));
+    card.querySelector("[data-exact]").addEventListener("click", async () => {
+      store.set(EXACT_KEY, "on");
+      closeCard({ force: true });
+      await openTabCapture();
+      startPick();
+    });
+    card.querySelector("[data-quick]").addEventListener("click", () => {
+      store.set(EXACT_KEY, "off");
+      exactRefused = true;
+      closeCard({ force: true });
+      startPick();
+    });
+    const b = pickBtn.getBoundingClientRect();
+    placeCard(card, Math.max(16, b.left - 360), Math.max(16, b.top - 260));
+  }
+
   // --- picking ------------------------------------------------------------
 
   function startPick() {
@@ -482,7 +793,13 @@
     picking = true;
     pickBtn.classList.add("on");
     pickBtn.textContent = "Cancel";
-    hintEl = el("div", "hint", "Click the spot you want to comment on · <kbd>Esc</kbd> to cancel");
+    hintEl = el(
+      "div",
+      "hint",
+      tabStream
+        ? "Click the spot you want to comment on — the picture is taken exactly as you see it · <kbd>Esc</kbd> to cancel"
+        : "Click the spot you want to comment on · <kbd>Esc</kbd> to cancel",
+    );
     hlEl = el("div", "hl", "<span></span>");
     hlEl.style.display = "none";
     root.append(hintEl, hlEl);
@@ -493,6 +810,9 @@
   function stopPick() {
     picking = false;
     hovered = null;
+    // Cancelled before a spot was clicked: stop sharing now. (A click hands
+    // the stream to grabTab first, which stops it after the picture.)
+    closeTabCapture();
     pickBtn.classList.remove("on");
     pickBtn.textContent = "Comment";
     hintEl?.remove();
@@ -532,7 +852,8 @@
     "mousemove",
     (e) => {
       if (!picking || !fromPage(e)) return;
-      const n = document.elementFromPoint(e.clientX, e.clientY);
+      // The highlight shows exactly what a click here will pick.
+      const n = pickTarget(e.clientX, e.clientY);
       if (!n || n === host || n === hovered) return;
       hovered = n;
       const r = n.getBoundingClientRect();
@@ -561,15 +882,20 @@
       if (!picking || !fromPage(e)) return;
       e.preventDefault();
       e.stopPropagation();
-      const n = document.elementFromPoint(e.clientX, e.clientY) || document.body;
+      const n = pickTarget(e.clientX, e.clientY);
       const r = n.getBoundingClientRect();
       const spot = {
         clientX: e.clientX,
         clientY: e.clientY,
         selector: selectorFor(n),
         label: describe(n),
+        key: fingerprint(n),
         xPct: r.width ? (e.clientX - r.left) / r.width : 0.5,
         yPct: r.height ? (e.clientY - r.top) / r.height : 0.5,
+        dx: e.clientX - r.left,
+        dy: e.clientY - r.top,
+        w: r.width,
+        h: r.height,
         pageX: e.clientX + scrollX,
         pageY: e.clientY + scrollY,
         // The screen as it was when the spot was picked: the comment belongs
@@ -577,6 +903,11 @@
         page: { origin: location.origin, url: urlWithoutFocus(), key: pageKey(), title: document.title },
         viewport: { w: innerWidth, h: innerHeight, dpr: devicePixelRatio || 1 },
       };
+      // The picture is taken now, as the reviewer saw it: from the screen
+      // itself when sharing was allowed, otherwise drawn (see capture).
+      const stream = tabStream;
+      tabStream = null;
+      spot.shot = stream ? grabTab(stream, spot, n).then((shot) => shot || capture(spot, n, false)) : capture(spot, n, true);
       stopPick();
       compose(spot);
     },
@@ -676,6 +1007,7 @@
       <label for="rv-text">What is wrong, or what should change?</label>
       <textarea id="rv-text" maxlength="4000" placeholder="Describe the problem. What did you expect to see?"></textarea>
       <label class="check"><input type="checkbox" checked data-shot> Attach a screenshot of this screen</label>
+      <div class="preview" data-preview><span>Taking the picture…</span></div>
       <div class="row"><button type="button" class="ghost" data-cancel>Cancel</button><button type="button" class="go" data-save>Save comment</button></div>`;
     body.querySelector("[data-kind]").replaceWith(chips(KINDS, kind, (k) => (kind = k), "What kind"));
     body.querySelector("[data-pri]").replaceWith(chips(PRIORITIES, priority, (p) => (priority = p), "How urgent"));
@@ -691,12 +1023,11 @@
       saveBtn.disabled = true;
       saveBtn.textContent = "Saving…";
       const wantShot = body.querySelector("[data-shot]").checked;
-      // The card steps aside so it is not in the picture; say what is happening.
       card.style.visibility = "hidden";
-      const working = el("div", "toast", wantShot ? "Taking the screenshot and saving…" : "Saving…");
+      const working = el("div", "toast", "Saving…");
       working.setAttribute("role", "status");
       root.appendChild(working);
-      const screenshot = wantShot ? await capture(spot) : null;
+      const screenshot = wantShot ? (await spot.shot)?.url || null : null;
       try {
         const { comment } = await send("POST", API, {
           kind,
@@ -704,7 +1035,19 @@
           text,
           screenshot,
           page: spot.page,
-          target: { selector: spot.selector, label: spot.label, xPct: spot.xPct, yPct: spot.yPct, pageX: spot.pageX, pageY: spot.pageY },
+          target: {
+            selector: spot.selector,
+            label: spot.label,
+            key: spot.key,
+            xPct: spot.xPct,
+            yPct: spot.yPct,
+            dx: spot.dx,
+            dy: spot.dy,
+            w: spot.w,
+            h: spot.h,
+            pageX: spot.pageX,
+            pageY: spot.pageY,
+          },
           viewport: spot.viewport,
           tech: (window.__jadmReviewLog || []).slice(-15),
         });
@@ -725,6 +1068,23 @@
     saveBtn.addEventListener("click", save);
     placeCard(card, spot.clientX, spot.clientY);
     textEl.focus();
+    // The picture as it will be saved, so the reviewer can see the circle is
+    // on the right spot before saving.
+    Promise.resolve(spot.shot).then((shot) => {
+      const box = card.isConnected && card.querySelector("[data-preview]");
+      if (!box) return;
+      if (!shot) {
+        box.innerHTML = "<span>The picture could not be taken; the comment still saves without it.</span>";
+        return;
+      }
+      box.innerHTML = `<img alt="Your picture"><span>${
+        shot.marked
+          ? "Your picture. The red circle marks your spot; if it is not where you meant, press Cancel and click again."
+          : "Your picture. Your spot could not be marked exactly in it, so it has no circle."
+      }</span>`;
+      box.querySelector("img").src = shot.url;
+      box.querySelector("img").addEventListener("load", () => placeCard(card, spot.clientX, spot.clientY), { once: true });
+    });
   }
 
   // The board's "Show on the page" puts review-focus inside the hash
@@ -830,51 +1190,93 @@
     return libLoading;
   }
 
-  async function capture(spot) {
+  /*
+   * The screenshot, taken the moment the spot is picked (not on Save), so it
+   * shows exactly what the reviewer was looking at, hover effects included,
+   * and nothing on the page can move in between. html2canvas copies the page
+   * as soon as it is called; the picture is drawn while the reviewer types.
+   *
+   * The red circle is placed from the picture's own layout: the clicked
+   * element is tagged before the copy is made and measured inside the copy,
+   * so the circle sits on that element in the picture even where html2canvas
+   * draws something a little differently from the real screen.
+   */
+  const MARK = "data-jadm-review-spot";
+  // atClick: called in the very click that picked the spot, so the page has
+  // not moved since; only then may the clicked point itself stand in for an
+  // element the copy did not find.
+  async function capture(spot, node, atClick) {
+    const W = innerWidth;
+    const H = innerHeight;
+    const X = scrollX;
+    const Y = scrollY;
+    const ready = Boolean(window.html2canvas);
+    // Each picture has its own tag, so two pictures being drawn at once can
+    // never mark each other's element.
+    const tag = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    let tagged = false;
     try {
-      const html2canvas = await loadShotLib();
-      host.style.display = "none";
-      // Where the spot is now, not where it was clicked: the page may have
-      // scrolled while the comment was being written.
-      const at = findTarget({ target: spot }) || { x: spot.clientX, y: spot.clientY };
+      const html2canvas = window.html2canvas || (await loadShotLib());
       // Big screens make big pictures; 1600px across is plenty to see the problem.
-      const scale = Math.min(devicePixelRatio || 1, 1.5, 1600 / innerWidth);
-      const canvas = await Promise.race([
-        html2canvas(document.body, {
-          x: scrollX,
-          y: scrollY,
-          width: innerWidth,
-          height: innerHeight,
-          windowWidth: innerWidth,
-          windowHeight: innerHeight,
-          scale,
-          useCORS: true,
-          logging: false,
-          ignoreElements: (n) => n === host,
-          // The copy the picture is drawn from starts its animations over;
-          // finish them at once so it shows what the reviewer was looking at,
-          // not the first frame of an intro.
-          onclone: (doc) => {
-            const s = doc.createElement("style");
-            s.textContent =
-              "*,*::before,*::after{animation-duration:0s!important;animation-delay:0s!important;" +
-              "animation-iteration-count:1!important;transition-duration:0s!important;transition-delay:0s!important}";
-            doc.head.appendChild(s);
-          },
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 15000)),
-      ]);
-      const ctx = canvas.getContext("2d");
-      ctx.lineWidth = 4 * scale;
-      ctx.strokeStyle = "#da1e28";
-      ctx.beginPath();
-      ctx.arc(at.x * scale, at.y * scale, 22 * scale, 0, Math.PI * 2);
-      ctx.stroke();
-      return canvas.toDataURL("image/jpeg", 0.8);
+      const scale = Math.min(devicePixelRatio || 1, 1.5, 1600 / W);
+      let mark = null; // the spot in the copy's document coordinates
+      if (node?.isConnected) {
+        node.setAttribute(MARK, tag);
+        tagged = true;
+      }
+      // html2canvas copies the page as it is called; the tag comes off the
+      // real page straight after.
+      const job = html2canvas(document.body, {
+        x: X,
+        y: Y,
+        scrollX: X,
+        scrollY: Y,
+        width: W,
+        height: H,
+        windowWidth: W,
+        windowHeight: H,
+        scale,
+        useCORS: true,
+        logging: false,
+        ignoreElements: (n) => n === host,
+        onclone: (doc) => {
+          // The copy starts its animations over; finish them at once so it
+          // shows what the reviewer saw, not the first frame of an intro.
+          const s = doc.createElement("style");
+          s.textContent =
+            "*,*::before,*::after{animation-duration:0s!important;animation-delay:0s!important;" +
+            "animation-iteration-count:1!important;transition-duration:0s!important;transition-delay:0s!important}";
+          doc.head.appendChild(s);
+          const found = doc.querySelectorAll(`[${MARK}="${tag}"]`);
+          const win = doc.defaultView;
+          if (found.length === 1 && win) {
+            const r = found[0].getBoundingClientRect();
+            if (r.width && r.height) mark = { x: r.left + win.scrollX + r.width * spot.xPct, y: r.top + win.scrollY + r.height * spot.yPct };
+          }
+          doc.querySelectorAll(`[${MARK}]`).forEach((e) => e.removeAttribute(MARK));
+        },
+      });
+      if (tagged) {
+        node.removeAttribute(MARK);
+        tagged = false;
+      }
+      const canvas = await Promise.race([job, new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 20000))]);
+      // Picture pixels per CSS pixel, from the picture itself.
+      const k = canvas.width / W;
+      // Where the spot is in the picture: from the copy's own layout of the
+      // element; or the clicked point, when this is the click itself and the
+      // page cannot have moved. Otherwise no circle at all, never a guess.
+      const p = mark ? { x: mark.x - X, y: mark.y - Y } : atClick && ready ? { x: spot.clientX, y: spot.clientY } : null;
+      if (p) ring(canvas.getContext("2d"), p.x * k, p.y * k, k);
+      // Read back by the accuracy test: where the circle was drawn and how.
+      window.__jadmReviewLastMark = p
+        ? { x: p.x, y: p.y, k, fromCopy: Boolean(mark), marked: true, clientX: spot.clientX, clientY: spot.clientY }
+        : { marked: false, clientX: spot.clientX, clientY: spot.clientY };
+      return { url: canvas.toDataURL("image/jpeg", 0.85), marked: Boolean(p) };
     } catch {
       return null;
     } finally {
-      host.style.display = "";
+      if (tagged) node.removeAttribute(MARK);
     }
   }
 
@@ -882,7 +1284,7 @@
 
   root.querySelector(".bar").addEventListener("click", (e) => {
     const act = e.target.closest("button")?.dataset.act;
-    if (act === "pick") picking ? stopPick() : startPick();
+    if (act === "pick") picking ? stopPick() : beginComment();
     if (act === "pins") {
       pinsHidden = !pinsHidden;
       store.set(HIDE_KEY, pinsHidden ? "1" : "0");
@@ -910,9 +1312,10 @@
           pinsHidden = false;
           store.set(HIDE_KEY, "0");
         }
-        const n = uniqueMatch(c.target.selector);
+        // Scrolled to only when its element is recognised here; never to an
+        // old position that may now show something else.
+        const n = targetNode(c);
         if (n) n.scrollIntoView({ block: "center" });
-        else scrollTo(0, Math.max(0, c.target.pageY - innerHeight / 2));
         await new Promise((r) => setTimeout(r, 300));
         renderPins();
         const pin = layer.querySelector(`.pin[data-id="${CSS.escape(id)}"]`);
@@ -936,6 +1339,9 @@
 
   const mount = async () => {
     document.body.appendChild(host);
+    // Ready before the first click, so the picture is taken at the very
+    // moment of the click (see capture).
+    loadShotLib().catch(() => {});
     try {
       const r = await fetch(`${BASE}/api/me`, { credentials: "same-origin", cache: "no-store", headers: AUTH });
       if (r.status === 401) return toEnter();

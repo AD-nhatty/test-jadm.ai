@@ -16,6 +16,12 @@ Comments pinned on the **real, live jadm.ai**, shared with the whole review team
 
 Then, whenever something is wrong: press **Comment**, click the spot, and write what you expected. Red pins are open comments, green pins are fixed. After you reload a page, click **JADM Comment** once more.
 
+Before saving, the comment box shows the picture that will be saved, with its red circle. If the circle is not where you meant, press **Cancel** and click again.
+
+Marks are exact or not shown. A pin appears only when its spot can be shown exactly: its element is on the screen, is the same element (an icon is recognised by what it belongs to, and numbers on it may change), and nothing covers it. Otherwise the comment stays on the feedback board with its picture, and "Show on the page" says the spot is not on the screen now.
+
+In Chrome and Edge, pressing **Comment** asks to **share this tab**: press **Share**. The picture saved with the comment is then taken from the screen itself at the moment the spot is clicked, pixel for pixel, with the red circle exactly where the reviewer clicked, and sharing stops at once. A reviewer who prefers not to can choose **Quick pictures instead** the first time; those are drawn from the page, look very close but not always identical, and still have the circle in the right place.
+
 The button is personal: it signs comments with your name. Do not send it to anyone. Use a computer; phones do not run bookmark buttons easily.
 
 ## Put it online on Vercel (free, about 10 minutes)
@@ -44,7 +50,9 @@ npm install
 npm test
 ```
 
-32 tests start real copies of the site and check the door, the buttons, comments, screenshots, storage and both hosts. With `TEST_DATABASE_URL=postgresql://…` they also run on PostgreSQL. GitHub runs them on every push (the Actions tab); a red cross there means do not deploy that change.
+The tests start real copies of the site and check the door, the buttons, comments, screenshots, storage and both hosts. With `TEST_DATABASE_URL=postgresql://…` they also run on PostgreSQL. GitHub runs them on every push (the Actions tab); a red cross there means do not deploy that change.
+
+`test/browser.test.js` checks, in a real browser, that the red circle in every saved screenshot and every pin on the page land on the exact spot that was clicked: on a wide screen (where pictures are scaled down) and a narrow one, with exact and quick pictures, after scrolling, and under a see-through layer like the one jadm.ai has. It needs a browser once: `npx playwright-core install chromium` (or `PW_CHANNEL=chrome` to use Google Chrome).
 
 ## Run it on your own computer
 

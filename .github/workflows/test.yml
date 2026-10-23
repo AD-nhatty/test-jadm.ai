@@ -29,6 +29,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # For test/browser.test.js: where the red circle and the pins land,
+      # checked in a real browser.
+      - name: Browser for the mark tests
+        run: npx playwright-core install --with-deps chromium
       - name: Tests, comments in local files
         run: npm test
       - name: Tests, comments in PostgreSQL (as on Vercel)
