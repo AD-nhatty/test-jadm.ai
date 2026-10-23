@@ -4,7 +4,9 @@
 // page shaped like jadm.ai (test/fixture/page.html).
 //
 // Part of npm test. Needs a browser: `npx playwright-core install chromium`
-// once, or PW_CHANNEL=chrome to use an installed Google Chrome.
+// once, or PW_CHANNEL=chrome to use an installed Google Chrome. The full
+// Chromium ("chromium" channel) is used by default: the stripped-down
+// headless shell cannot share a tab, so it cannot take exact pictures.
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -15,7 +17,7 @@ import { startSite, TEAM_PASSWORD } from "./helpers.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const { chromium } = await import("playwright-core");
-const launchOptions = { args: ["--auto-accept-this-tab-capture"], ...(process.env.PW_CHANNEL ? { channel: process.env.PW_CHANNEL } : {}) };
+const launchOptions = { args: ["--auto-accept-this-tab-capture"], channel: process.env.PW_CHANNEL || "chromium" };
 // No browser available: say so instead of failing every test.
 let skip = false;
 try {

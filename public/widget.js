@@ -767,7 +767,8 @@
       <div class="body">
         <p class="text">So your comment comes with an exact picture of what you see, your browser will ask to <b>share this tab</b>. Press <b>Share</b>.</p>
         <p class="text" style="color:#525252">It takes one picture of this screen when you click your spot, then stops at once. Nothing is recorded, and only your comment's picture is saved.</p>
-        <div class="row"><button type="button" class="ghost" data-quick>Quick pictures instead</button><button type="button" class="go" data-exact>Continue</button></div>
+        <p class="text" style="color:#525252">Without it, pictures are drawn from the page instead: the circle is still in the right place, but the picture can look a little different from your screen.</p>
+        <div class="row"><button type="button" class="ghost" data-quick>Drawn pictures instead</button><button type="button" class="go" data-exact>Continue</button></div>
       </div>`;
     card.querySelector("header button").addEventListener("click", () => closeCard({ force: true }));
     card.querySelector("[data-exact]").addEventListener("click", async () => {
@@ -1217,8 +1218,10 @@
     let tagged = false;
     try {
       const html2canvas = window.html2canvas || (await loadShotLib());
-      // Big screens make big pictures; 1600px across is plenty to see the problem.
-      const scale = Math.min(devicePixelRatio || 1, 1.5, 1600 / W);
+      // Drawn at exactly one picture pixel per CSS pixel: at any other scale
+      // (1.04 on a 125% screen, 0.83 on a 1920 one) html2canvas paints
+      // backgrounds and shadows out of place. Made smaller afterwards.
+      const scale = 1;
       let mark = null; // the spot in the copy's document coordinates
       if (node?.isConnected) {
         node.setAttribute(MARK, tag);
@@ -1260,7 +1263,18 @@
         node.removeAttribute(MARK);
         tagged = false;
       }
-      const canvas = await Promise.race([job, new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 20000))]);
+      const drawn = await Promise.race([job, new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 20000))]);
+      // Big screens make big pictures; 1600px across is plenty to see the
+      // problem. The browser shrinks it (smoothly), not html2canvas.
+      let canvas = drawn;
+      if (drawn.width > 1600) {
+        canvas = document.createElement("canvas");
+        canvas.width = 1600;
+        canvas.height = Math.round((drawn.height * 1600) / drawn.width);
+        const g = canvas.getContext("2d");
+        g.imageSmoothingQuality = "high";
+        g.drawImage(drawn, 0, 0, canvas.width, canvas.height);
+      }
       // Picture pixels per CSS pixel, from the picture itself.
       const k = canvas.width / W;
       // Where the spot is in the picture: from the copy's own layout of the
